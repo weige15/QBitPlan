@@ -3,6 +3,7 @@ title: Initial QBitPlan Research Brief
 status: research-input
 date: 2026-08-02
 verification: primary-source verification pending
+synthesis: unverified initial synthesis
 ---
 
 This document is the initial research synthesis that motivated QBitPlan.

@@ -14,14 +14,13 @@ Every reported result must identify itself as one of:
 - lookup-table estimated;
 - directly measured.
 
-These categories must not be blurred. In particular, simulated or
-fake-quantized execution is not direct evidence of memory or latency
-improvement.
+These categories must not be blurred. Simulated or fake-quantized execution is
+not direct evidence of memory or latency improvement.
 
 ## 2. Reference, ground truth, and metrics
 
-- Every experiment declares its high-precision reference and its numeric
-  format. The choice is OPEN until an experiment protocol accepts it.
+- Every experiment declares its high-precision reference and numeric format
+  before evaluation.
 - Ground truth is the external task target. A reference execution is a model
   comparison point; it is not ground truth.
 - Every experiment declares a task-appropriate primary quality metric before
@@ -34,7 +33,8 @@ improvement.
   are diagnostic unless a later accepted protocol explicitly promotes one.
 - A diagnostic metric must not silently replace the primary quality metric.
 - Degradation is reported relative to the declared high-precision reference.
-  The degradation threshold is OPEN until selected by an accepted protocol.
+- The accepted degradation threshold must be declared by the experiment
+  protocol before evaluation.
 
 ## 3. Data and evaluation boundaries
 
@@ -70,7 +70,8 @@ report must state which of the following were measured, estimated, or omitted:
 
 If unused higher-precision slices remain resident, selecting four-bit
 execution must not be reported as reducing peak storage. Hardware and backend
-choices, along with cost coefficients, are OPEN until accepted separately.
+choices, along with cost coefficients, must be declared by the accepted
+protocol.
 
 ## 6. Reproducibility
 

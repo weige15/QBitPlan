@@ -1,89 +1,56 @@
 # QBitPlan repository instructions
 
-## Read before working
+## Before editing
 
-Read these sources in order:
+Read, in order:
 
-1. `README.md`
-2. `CONTEXT.md`
-3. `SCIENTIFIC_STANDARDS.md`
-4. Relevant ADRs under `docs/adr/`
+1. [README.md](README.md)
+2. [CONTEXT.md](CONTEXT.md)
+3. [SCIENTIFIC_STANDARDS.md](SCIENTIFIC_STANDARDS.md)
+4. Relevant [ADRs](docs/adr/)
 5. The originating GitHub issue and its comments
 
-Read `docs/research/initial-research-brief.md` when research rationale is
-needed. It is background input, not an accepted specification.
+Use the [issue-tracker guide](docs/agents/issue-tracker.md) for GitHub work
+and the [domain guide](docs/agents/domain.md) for terminology and ADRs.
 
-## Source-of-truth hierarchy
+## Source of truth
 
-- Accepted technical or research decision: relevant ADR
-- Project terminology: `CONTEXT.md`
-- Scientific and reporting invariants: `SCIENTIFIC_STANDARDS.md`
-- Task scope and acceptance criteria: originating GitHub issue
-- Research background: files under `docs/research/`
-- Public orientation: `README.md`
+When documents conflict, report the conflict explicitly. Resolve it in this
+order:
 
-When sources conflict, report the conflict. Do not silently reconcile them.
+1. Accepted technical or research decision: relevant ADR.
+2. Project terminology: [CONTEXT.md](CONTEXT.md).
+3. Scientific and reporting invariants:
+   [SCIENTIFIC_STANDARDS.md](SCIENTIFIC_STANDARDS.md).
+4. Task scope: originating GitHub issue.
+5. Research background: documents under `docs/research/`.
+6. Public orientation: [README.md](README.md).
 
-## Current project phase
+## Document ownership
 
-The project is defining its v0.1 experimental contract.
+- Keep shared terminology in [CONTEXT.md](CONTEXT.md).
+- Keep scientific and reporting invariants in
+  [SCIENTIFIC_STANDARDS.md](SCIENTIFIC_STANDARDS.md).
+- Keep proposed, accepted, and OPEN technical or research decisions in the
+  relevant ADR.
+- Keep [README.md](README.md) as orientation, not specification.
+- Treat the research brief body as immutable research input; metadata may
+  identify its verification status, but its claims must not be presented as
+  independently verified.
 
-Do not implement production infrastructure, choose unresolved dependencies,
-or run expensive experiments unless the originating issue explicitly
-authorizes it.
+## Scope and implementation
 
-## Work boundaries
+- Work only from an originating issue or accepted specification.
+- Keep changes within the requested scope and preserve unrelated user work.
+- Do not choose OPEN dependencies, environments, hardware, datasets, or
+  backends by convention.
+- Do not add production infrastructure, code, dependencies, CI, configuration
+  frameworks, or experiment implementations to a documentation-only task.
+- Do not run costly experiments or publish externally without explicit scope.
 
-For requests to inspect, explain, research, review, or plan:
+## Verification and handoff
 
-- Inspect the relevant repository material.
-- Report findings without modifying files unless edits were requested.
-
-For requests to implement an approved issue:
-
-- Make only the requested in-scope changes.
-- Run relevant non-destructive validation.
-- Stop before destructive actions, external publication, costly full-scale
-  experiments, or material scope expansion.
-
-## Research boundaries
-
-- Do not describe layer precision decisions as independent.
-- Do not equate human task difficulty with quantization difficulty.
-- Do not use final-evaluation queries for training, threshold selection,
-  profile clustering, or hyperparameter tuning.
-- Do not claim memory or latency improvement from average bit-width.
-- Do not use a later hidden state to justify an earlier precision decision.
-- Do not fabricate experimental measurements when the required hardware,
-  model, dataset, or backend is unavailable.
-
-## Engineering workflow
-
-- Every implementation change begins from a GitHub issue or accepted spec.
-- Use one branch per issue.
-- Prefer small vertical slices that are independently verifiable.
-- Use TDD for deterministic behavior at agreed public seams.
-- Run a smoke configuration before any authorized expensive experiment.
-- Keep raw experiment artifacts immutable.
-- Record decisions that outlive one issue in an ADR.
-- Do not create abstractions for deferred features.
-
-## Completion requirements
-
-Before considering an implementation issue complete:
-
-- Run targeted tests and repository-wide checks that exist.
-- Record the exact validation commands and outcomes.
-- Confirm the implementation matches the originating issue.
-- Confirm it complies with `SCIENTIFIC_STANDARDS.md`.
-- Document unavailable validations honestly.
-
-## Agent skills
-
-### Issue tracker
-
-Issues and PRDs live in GitHub Issues; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Domain docs
-
-This is a single-context repo using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+- Run the smallest relevant checks, then broader repository checks that exist.
+- Check every relative Markdown link after documentation changes.
+- Record exact commands, results, unavailable checks, remaining OPEN decisions,
+  and known limitations in the handoff.

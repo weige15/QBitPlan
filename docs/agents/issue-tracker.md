@@ -1,22 +1,24 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and PRDs for this repository live in GitHub Issues. Use the `gh` CLI
+for issue operations; it infers the repository from the Git remote.
 
-## Conventions
+## Required workflow
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`
-- **Read an issue**: `gh issue view <number> --comments`
-- **List issues**: `gh issue list --state open`
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
+- Identify the originating issue before implementation.
+- Read its body and comments with `gh issue view <number> --comments`.
+- Treat the issue as the task contract; record durable technical or research
+  decisions in an ADR.
+- Do not substitute an unverified research brief for an accepted issue or ADR.
 
-Infer the repo from `git remote -v`; `gh` does this automatically inside this clone.
+## Common commands
 
-## Pull requests as a triage surface
+- Create: `gh issue create --title "..." --body "..."`
+- Read: `gh issue view <number> --comments`
+- List: `gh issue list --state open`
+- Comment: `gh issue comment <number> --body "..."`
+- Edit labels: `gh issue edit <number> --add-label "..."`
+- Close: `gh issue close <number> --comment "..."`
 
-**PRs as a request surface: no.**
-
-When a skill says “publish to the issue tracker”, create a GitHub issue.
-
-When a skill says “fetch the relevant ticket”, run `gh issue view <number> --comments`.
+Pull requests are not a substitute for an originating issue. For repository
+scope and document ownership, see [AGENTS.md](../../AGENTS.md).

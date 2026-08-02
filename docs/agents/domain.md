@@ -1,27 +1,16 @@
-# Domain Docs
+# Domain documentation
 
-## Before exploring, read these
+QBitPlan uses one shared domain context. Before exploring or changing domain
+language, read [CONTEXT.md](../../CONTEXT.md) and the relevant
+[ADRs](../adr/).
 
-- `CONTEXT.md` at the repo root
-- `docs/adr/` — read ADRs that touch the area being explored
+## Rules
 
-If these files do not exist, proceed silently. The `/domain-modeling` skill creates them lazily when concepts or decisions are resolved.
-
-## File structure
-
-This is a single-context repo:
-
-```text
-/
-├── CONTEXT.md
-├── docs/adr/
-└── src/
-```
-
-## Use the glossary's vocabulary
-
-When naming domain concepts, use the terms defined in `CONTEXT.md`. If a needed concept is missing, note the gap for `/domain-modeling`.
-
-## Flag ADR conflicts
-
-If output contradicts an existing ADR, surface it explicitly rather than silently overriding it.
+- Use the glossary's vocabulary in issues, ADRs, code, experiments, plots, and
+  paper drafts.
+- Add a missing shared concept to [CONTEXT.md](../../CONTEXT.md) rather than
+  defining competing terms elsewhere.
+- Record technical or research decisions in an ADR; do not hide them in the
+  glossary.
+- If documents conflict, report the conflict explicitly and resolve it using
+  the repository source-of-truth rules in [AGENTS.md](../../AGENTS.md).
