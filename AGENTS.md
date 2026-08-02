@@ -77,3 +77,13 @@ Before considering an implementation issue complete:
 - Confirm the implementation matches the originating issue.
 - Confirm it complies with `SCIENTIFIC_STANDARDS.md`.
 - Document unavailable validations honestly.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in GitHub Issues; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+This is a single-context repo using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
