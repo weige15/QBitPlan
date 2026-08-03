@@ -42,6 +42,13 @@ An ordered vector of bit-width decisions, one per layer group.
 A constraint on execution cost. It is not synonymous with an average-bit
 target.
 
+### Cost vector
+
+The ordered set of execution-cost dimensions reported for a query/profile
+execution. Its components remain separate and may be measured, estimated, or
+explicitly omitted; it is not an average-bit target or an arbitrary scalar
+coefficient.
+
 ### Precision shape
 
 The distribution of extra precision across layer groups. Two queries may have
