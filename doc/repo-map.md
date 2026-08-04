@@ -2,9 +2,9 @@
 
 ## Repository Summary
 
-QBitPlan is currently a documentation and research-definition workspace for
-query-conditioned causal bit planning. The current main branch contains no
-scientific runtime or experiment runner.
+QBitPlan is a research project for query-conditioned causal bit planning. This
+branch contains the Issue 25 execution seam and its standalone MATH
+data-preparation command.
 
 ## Directory Structure
 
@@ -15,36 +15,36 @@ scientific runtime or experiment runner.
 - `scripts/` contains standalone repository/data-preparation commands.
 - `tests/` contains focused tests for standalone commands.
 - `data/pinned/` contains local pinned source checkouts requested for data
-  preparation; these are not implementation modules.
+  preparation; raw records are ignored runtime inputs, not implementation modules.
 
 ## Main Source Files
 
-The current main branch has no application package. The data-preparation
-entry point is `scripts/build_math_manifest.py`.
+The data-preparation entry point is `scripts/build_math_manifest.py`; the
+Issue 25 scientific entry point is `qbitplan`.
 
 ## Existing Tests
 
-Before this change, no test suite or test directory existed on main. The
-focused manifest-builder tests are in `tests/test_build_math_manifest.py`.
+Focused manifest-builder tests are in `tests/test_build_math_manifest.py` and
+Issue 25 seam tests are in `tests/test_stage1_smoke_seam.py`.
 
 ## Build System
 
-No build system or package metadata is present on main. The builder uses only
-the Python standard library.
+`pyproject.toml` defines the `qbitplan` package and console script. The
+manifest builder uses only the Python standard library.
 
 ## Runtime or CLI Entry Points
 
-The standalone command is invoked with `python3 scripts/build_math_manifest.py`.
-It is deliberately separate from the future scientific CLI.
+The standalone preparation command is `python3 scripts/build_math_manifest.py`;
+the scientific smoke command is `qbitplan stage1 run --plan <smoke-plan> --mode smoke --gpu-uuid <uuid>`.
 
 ## Data and Assets
 
-The requested local checkouts are `data/pinned/math` at MATH revision
-`985bdc1696e88e8643f081a0ff4719da39f2ae2a` and `data/pinned/math-500` at
-MATH-500 revision `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`. The MATH Git
-checkout contains loader code but not the raw 12,500 problem JSON files. The
-builder therefore requires an explicit raw source root with `train/` and
-`test/` directories.
+The requested local checkout is `data/pinned/math` at MATH revision
+`985bdc1696e88e8643f081a0ff4719da39f2ae2a`; raw records are under
+`data/pinned/math-raw/MATH`; `data/pinned/math-500` is at MATH-500
+revision `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`. The MATH Git checkout
+contains loader code but not the raw 12,500 problem JSON files. The builder
+requires an explicit raw source root with `train/` and `test/` directories.
 
 ## Existing Documentation
 
@@ -55,7 +55,7 @@ are in `CONTEXT.md` and `SCIENTIFIC_STANDARDS.md`; accepted task splits are in
 ## Detected Dependencies
 
 The builder has no production dependency and imports only Python standard
-library modules. The repository does not declare a Python package on main.
+library modules. The `qbitplan` package is stdlib-only at this slice.
 
 ## Important Scripts
 
@@ -65,16 +65,16 @@ library modules. The repository does not declare a Python package on main.
 
 ## Current Git State
 
-The working branch is `main` at the documentation-only baseline. The local
-requested source checkouts are present under `data/pinned/` and are currently
-untracked until their storage policy is finalized.
+Pinned source data is materialized under `data/pinned/` and ignored by Git;
+generated manifests are retained under `data/manifests/`.
+
 
 ## Missing or Ambiguous Areas
 
-The raw MATH source-record archive/path is not fixed by the repository and is
-not included in the MATH Git checkout. The combined issue-8 Parquet cache is
-not accepted as a source-ID authority because its provenance marks split
-identity as unverified.
+The raw MATH source archive is not included in the MATH Git checkout; its
+content hash is recorded in `docs/data-preparation.md`. The combined issue-8
+Parquet cache is not accepted as a source-ID authority because its provenance
+marks split identity as unverified.
 
 ## Notes for Future Skills
 

@@ -15,7 +15,7 @@ def _write_source_record(root: Path, source_id: str, problem: str) -> None:
             {
                 "problem": problem,
                 "solution": f"solution for {problem}",
-                "level": 1,
+                "level": "Level 1",
                 "type": "Algebra",
             },
             ensure_ascii=False,
@@ -88,7 +88,7 @@ def test_build_command_writes_separated_manifest_and_smoke_plan(tmp_path: Path) 
     )
 
     expected_train_hash = hashlib.sha256(
-        b'{"level":1,"problem":"train-0","solution":"solution for train-0","type":"Algebra"}'
+        b'{"level":"Level 1","problem":"train-0","solution":"solution for train-0","type":"Algebra"}'
     ).hexdigest()
     assert manifest["record_hashes"]["training"]["train/algebra/0.json"] == expected_train_hash
 

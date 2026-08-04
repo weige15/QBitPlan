@@ -2,3 +2,6 @@
 # but are not repository source files.
 data/pinned/*
 !data/pinned/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/

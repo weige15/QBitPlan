@@ -4,9 +4,14 @@
 issue 25. It is not part of the scientific CLI and does not load the combined
 MATH cache.
 
-The pinned Git checkout of `hendrycks/math` contains loaders and evaluation
-code, but not the raw 12,500 problem JSON files. Supply an explicit extracted
-source tree with this layout:
+The accepted source revision is `985bdc1696e88e8643f081a0ff4719da39f2ae2a`.
+The Git checkout contains loaders and evaluation code, but not the raw 12,500
+problem JSON files. The materialized pinned inputs are:
+
+The pinned raw tree is materialized at `data/pinned/math-raw/MATH/` from the
+content-addressed archive `https://gitee.com/hf-datasets/competition_math/raw/main/data/MATH.zip`, with archive SHA-256
+`d9b88da85e6ffa3e1057ae675238d6e192574243bdc45ca7d00a1339fc4d0874`. The
+pinned MATH-500 `test.jsonl` has SHA-256 `35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132`.
 
 ```text
 <source-root>/
@@ -15,14 +20,14 @@ source tree with this layout:
 ```
 
 Each source JSON object must contain the original MATH fields `problem`,
-`solution`, integer `level`, and string `type`. The source-relative POSIX path
-(for example `test/algebra/807.json`) is the source ID.
+`solution`, string `level` (for example, `Level 5`), and string `type`. The
+source-relative POSIX path (for example `test/algebra/807.json`) is the source ID.
 
 Run:
 
 ```bash
 python3 scripts/build_math_manifest.py \
-  --source-root /path/to/MATH \
+  --source-root data/pinned/math-raw/MATH \
   --math500-root data/pinned/math-500 \
   --manifest-output data/manifests/math-source.json \
   --smoke-plan-output data/manifests/math-smoke-plan.json

@@ -96,8 +96,8 @@ def _validate_source_record(record: Mapping[str, Any], path: Path) -> None:
         raise ManifestBuildError(f"source record {path} is missing fields: {missing}")
     if not isinstance(record["problem"], str) or not isinstance(record["solution"], str):
         raise ManifestBuildError(f"source record text fields must be strings: {path}")
-    if isinstance(record["level"], bool) or not isinstance(record["level"], int):
-        raise ManifestBuildError(f"source record level must be an integer: {path}")
+    if not isinstance(record["level"], str) or not record["level"]:
+        raise ManifestBuildError(f"source record level must be a non-empty string: {path}")
     if not isinstance(record["type"], str):
         raise ManifestBuildError(f"source record type must be a string: {path}")
 
