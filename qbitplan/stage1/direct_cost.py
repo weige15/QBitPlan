@@ -233,7 +233,7 @@ class NvmlMemoryProbe:
 
 
 class CudaTraceProbe:
-    """Capture one separate PyTorch CUDA trace without making estimates."""
+    """Capture one bounded CUDA-event trace without materializing profiler events."""
 
     def trace(
         self, operation: Callable[[], T], **_: Any
@@ -241,7 +241,12 @@ class CudaTraceProbe:
         try:
             import torch
         except ImportError:
-            return operation(), {
+            return cast(T, _invalid_execution("CUDA_TRACE_UNAVAILABLE")), {
+                "status": "invalid",
+                "reason_code": "CUDA_TRACE_UNAVAILABLE",
+            }
+        if not torch.cuda.is_available():
+            return cast(T, _invalid_execution("CUDA_TRACE_UNAVAILABLE")), {
                 "status": "invalid",
                 "reason_code": "CUDA_TRACE_UNAVAILABLE",
             }
@@ -249,31 +254,19 @@ class CudaTraceProbe:
         operation_completed = False
         result: T | None = None
         try:
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                record_shapes=False,
-                profile_memory=False,
-                with_stack=False,
-            ) as profiler:
-                operation_started = True
-                result = operation()
-                operation_completed = True
-                profiler.step()
-            events = []
-            for event in profiler.key_averages() or []:
-                device_time_us = getattr(event, "device_time_total", None)
-                if device_time_us is None:
-                    device_time_us = getattr(event, "cuda_time_total", None)
-                event_record: dict[str, Any] = {
-                    "name": event.name,
-                    "cpu_time_ns": int(event.self_cpu_time_total * 1000),
-                }
-                if device_time_us is not None:
-                    event_record["device_time_ns"] = int(device_time_us * 1000)
-                events.append(event_record)
+            _synchronize_cuda()
+            cuda_start = torch.cuda.Event(enable_timing=True)
+            cuda_end = torch.cuda.Event(enable_timing=True)
+            cuda_start.record()
+            operation_started = True
+            host_started_ns = time.perf_counter_ns()
+            result = operation()
+            operation_completed = True
+            cuda_end.record()
+            _synchronize_cuda()
+            host_finished_ns = time.perf_counter_ns()
+            host_elapsed_ns = host_finished_ns - host_started_ns
+            device_elapsed_ns = int(cuda_start.elapsed_time(cuda_end) * 1_000_000)
             omitted_dimensions = {
                 dimension: {
                     "status": "omitted/unavailable",
@@ -288,15 +281,25 @@ class CudaTraceProbe:
             }
             return result, {
                 "status": "complete",
-                "events": events,
-                "method": "PyTorch CUDA profiler key-average trace",
-                "trace_representation": "bounded_key_averages",
+                "events": [
+                    {
+                        "name": "qbitplan.operation",
+                        "host_start_ns": host_started_ns,
+                        "host_end_ns": host_finished_ns,
+                        "host_elapsed_ns": host_elapsed_ns,
+                        "device_time_ns": device_elapsed_ns,
+                    }
+                ],
+                "method": "CUDA event operation trace",
+                "trace_representation": "bounded_cuda_event",
                 "dimension_coverage": omitted_dimensions,
-                "tracer_overhead": _omitted("PROFILER_OVERHEAD_NOT_SEPARABLE"),
+                "tracer_overhead": _omitted("CUDA_EVENT_OVERHEAD_NOT_SEPARABLE"),
             }
         except Exception as exc:
             if not operation_started:
-                return operation(), {
+                return cast(T, _invalid_execution(
+                    f"CUDA_TRACE_FAILED:{type(exc).__name__}"
+                )), {
                     "status": "invalid",
                     "reason_code": f"CUDA_TRACE_FAILED:{type(exc).__name__}",
                 }
@@ -445,14 +448,16 @@ class DirectCostRunner:
                     str(last_result["reason_code"] or "WARMUP_FAILED"),
                 )
 
+        host_timing_observations: list[dict[str, int]] = []
         for repetition in range(MEASURED_COUNT):
             latency_observation: list[int] = []
-
             device_latency_observation: list[int] = []
+            timing_observation: list[dict[str, int]] = []
 
             def timed_operation(
                 record: list[int] = latency_observation,
                 device_record: list[int] = device_latency_observation,
+                timing_record: list[dict[str, int]] = timing_observation,
             ) -> Mapping[str, Any]:
                 _synchronize_cuda()
                 started = self.monotonic_ns()
@@ -465,7 +470,16 @@ class DirectCostRunner:
                     if cuda_end is not None:
                         cuda_end.record()
                     _synchronize_cuda()
-                    record.append(self.monotonic_ns() - started)
+                    finished = self.monotonic_ns()
+                    elapsed = finished - started
+                    record.append(elapsed)
+                    timing_record.append(
+                        {
+                            "host_start_ns": started,
+                            "host_end_ns": finished,
+                            "host_elapsed_ns": elapsed,
+                        }
+                    )
                     if cuda_start is not None and cuda_end is not None:
                         device_record.append(
                             int(cuda_start.elapsed_time(cuda_end) * 1_000_000)
@@ -479,15 +493,38 @@ class DirectCostRunner:
                     repetition=repetition,
                 )
                 last_result = _execution_status(last_result)
+            except MemoryProbeOperationError as exc:
+                return self._invalid_observation(
+                    query,
+                    variant_id,
+                    f"MEASUREMENT_EXCEPTION:{type(exc.cause).__name__}",
+                    measured_count=len(host_timing_observations),
+                    host_timestamps=[*host_timing_observations, *timing_observation],
+                    memory_observations=[
+                        *memory_observations,
+                        exc.observation,
+                    ],
+                )
             except Exception as exc:  # noqa: BLE001
                 return self._invalid_observation(
-                    query, variant_id, f"MEASUREMENT_EXCEPTION:{type(exc).__name__}"
+                    query,
+                    variant_id,
+                    f"MEASUREMENT_EXCEPTION:{type(exc).__name__}",
+                    measured_count=len(host_timing_observations),
+                    host_timestamps=[*host_timing_observations, *timing_observation],
+                    memory_observations=memory_observations,
                 )
-            if len(latency_observation) != 1:
+            if len(latency_observation) != 1 or len(timing_observation) != 1:
                 return self._invalid_observation(
-                    query, variant_id, "MEASUREMENT_ADAPTER_EXECUTION_COUNT_INVALID"
+                    query,
+                    variant_id,
+                    "MEASUREMENT_ADAPTER_EXECUTION_COUNT_INVALID",
+                    measured_count=len(host_timing_observations),
+                    host_timestamps=[*host_timing_observations, *timing_observation],
+                    memory_observations=memory_observations,
                 )
             latencies.append(latency_observation[0])
+            host_timing_observations.append(timing_observation[0])
             if len(device_latency_observation) == 1:
                 device_latencies.append(device_latency_observation[0])
             memory_observations.append(memory)
@@ -496,6 +533,9 @@ class DirectCostRunner:
                     query,
                     variant_id,
                     str(last_result["reason_code"] or "MEASURED_FORWARD_FAILED"),
+                    measured_count=len(host_timing_observations),
+                    host_timestamps=host_timing_observations,
+                    memory_observations=memory_observations,
                 )
 
         try:
@@ -515,9 +555,18 @@ class DirectCostRunner:
         trace_observation.setdefault("status", "invalid")
         trace_observation.setdefault("reason_code", "TRACE_UNAVAILABLE")
         trace_observation["evidence_class"] = DIRECT_EVIDENCE_CLASS
-        if trace_result["status"] != "complete":
+        if (
+            trace_result["status"] != "complete"
+            or trace_observation["status"] != "complete"
+        ):
+            reason_code = str(
+                trace_observation.get("reason_code")
+                or trace_result["reason_code"]
+                or "TRACE_UNAVAILABLE"
+            )
+            trace_result = _invalid_execution(reason_code)
             trace_observation["status"] = "invalid"
-            trace_observation["reason_code"] = trace_result["reason_code"]
+            trace_observation["reason_code"] = reason_code
 
         cost_vector = self._cost_vector(
             latencies, memory_observations, trace_observation
@@ -534,8 +583,13 @@ class DirectCostRunner:
             "repetitions": {
                 "warmup_count": WARMUP_COUNT,
                 "measured_count": MEASURED_COUNT,
-                "trace_pass_count": TRACE_PASS_COUNT,
+                "trace_pass_count": int(trace_result["status"] == "complete"),
+                "trace_pass_attempted": TRACE_PASS_COUNT,
+                "trace_status": trace_observation["status"],
+                "timing_method": "host monotonic plus synchronized CUDA event",
+                "timer_overhead": _omitted("CUDA_EVENT_TIMER_OVERHEAD_NOT_SEPARABLE"),
                 "latency_ns": latencies,
+                "host_timestamps": host_timing_observations,
                 "device_latency_ns": device_latencies,
                 "median_latency_ns": int(statistics.median(latencies)),
                 "median_device_latency_ns": (
@@ -556,7 +610,14 @@ class DirectCostRunner:
         return self.measure(query, variant_id)
 
     def _invalid_observation(
-        self, query: Mapping[str, Any], variant_id: str, reason_code: str
+        self,
+        query: Mapping[str, Any],
+        variant_id: str,
+        reason_code: str,
+        *,
+        measured_count: int = 0,
+        host_timestamps: Sequence[Mapping[str, Any]] = (),
+        memory_observations: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         return {
             "evidence_class": DIRECT_EVIDENCE_CLASS,
@@ -569,10 +630,16 @@ class DirectCostRunner:
             "reason_code": reason_code,
             "repetitions": {
                 "warmup_count": WARMUP_COUNT,
-                "measured_count": 0,
+                "measured_count": measured_count,
                 "trace_pass_count": 0,
+                "trace_pass_attempted": 0,
+                "trace_status": "not_attempted",
+                "host_timestamps": [dict(value) for value in host_timestamps],
             },
             "preparation": self._preparations.get(variant_id, {}),
+            "memory_observations": [
+                dict(value) for value in memory_observations
+            ],
             "cost_vector": {
                 dimension: _omitted(f"measurement-invalid/{reason_code}")
                 for dimension in COST_DIMENSIONS
@@ -645,6 +712,10 @@ def _trace_dimension(
 ) -> dict[str, Any]:
     if trace.get("status") != "complete":
         return _omitted(str(trace.get("reason_code") or "TRACE_UNAVAILABLE"))
+    coverage_key = key.removesuffix("_ns")
+    coverage = trace.get("dimension_coverage", {}).get(coverage_key)
+    if isinstance(coverage, Mapping) and coverage.get("status") != "measured":
+        return _omitted(str(coverage.get("reason") or "TRACE_DIMENSION_UNAVAILABLE"))
     value = trace.get(key)
     if not _valid_number(value):
         return _omitted(f"{key.upper()}_UNAVAILABLE")
@@ -686,6 +757,45 @@ def _coverage_records(
             }
         )
     return records
+
+
+def _measurement_scope(observations: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    scope = {
+        "latency": "host monotonic dispatch through synchronized output readiness",
+        "resident_accelerator_bytes": "absolute peak NVML device-used bytes",
+        "controller_probe_feedback_overhead": "omitted for offline profile execution",
+    }
+    for dimension in (
+        "host_to_device_bytes",
+        "prefetch_stall_time",
+        "kernel_switch_count",
+    ):
+        values = [
+            observation["cost_vector"][dimension]
+            for observation in observations
+        ]
+        measured_count = sum(value["status"] == "measured" for value in values)
+        if values and measured_count == len(values):
+            scope[dimension] = "trace-derived direct measurement"
+            continue
+        reasons = sorted(
+            {
+                str(value.get("reason") or "TRACE_DIMENSION_UNAVAILABLE")
+                for value in values
+                if value["status"] != "measured"
+            }
+        )
+        if measured_count:
+            scope[dimension] = (
+                f"partially measured ({measured_count}/{len(values)}); "
+                "omitted/unavailable/"
+                + (reasons[0] if reasons else "MIXED_COVERAGE")
+            )
+        else:
+            scope[dimension] = "omitted/unavailable/" + (
+                reasons[0] if reasons else "MIXED_COVERAGE"
+            )
+    return scope
 
 
 def execute_direct_cost_plan(
@@ -847,15 +957,16 @@ def execute_direct_cost_plan(
         "warmup_count": WARMUP_COUNT,
         "measured_count": MEASURED_COUNT,
         "trace_pass_count": TRACE_PASS_COUNT,
+        "trace_attempted_count": sum(
+            observation["repetitions"].get("trace_pass_attempted", 0)
+            for observation in observations
+        ),
+        "trace_completed_count": sum(
+            observation["repetitions"].get("trace_pass_count", 0)
+            for observation in observations
+        ),
         "cost_dimensions": list(COST_DIMENSIONS),
-        "measurement_scope": {
-            "latency": "host monotonic dispatch through synchronized output readiness",
-            "resident_accelerator_bytes": "absolute peak NVML device-used bytes",
-            "host_to_device_bytes": "annotated CUDA-copy trace records",
-            "prefetch_stall_time": "trace-derived dependent-copy gaps",
-            "kernel_switch_count": "trace-derived annotated group transitions",
-            "controller_probe_feedback_overhead": "omitted for offline profile execution",
-        },
+        "measurement_scope": _measurement_scope(observations),
         "hardware_identity": hardware_identity,
     }
     file_contents = {
