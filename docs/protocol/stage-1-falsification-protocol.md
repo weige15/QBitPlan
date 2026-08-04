@@ -1,8 +1,10 @@
 # QBitPlan Stage-1 falsification protocol
 
-- Status: ACCEPTED for the pre-`$to-spec` scientific contract
+- Status: ACCEPTED scientific contract; implementation/evaluation details
+  fixed before `$to-spec`
 - Date: 2026-08-04
 - Durable acceptance record: [ADR-0015](../adr/0015-stage-1-consolidated-protocol.md)
+- Execution contract: [Stage-1 execution contract](stage-1-execution-contract.md)
 - Map: [Wayfinder: Lock the QBitPlan Stage-1 falsification protocol](https://github.com/weige15/QBitPlan/issues/2)
 
 ## Purpose and boundary
@@ -162,18 +164,21 @@ negative. Protocol revision is reserved for validity failures.
 
 Every run must record model/dataset revisions, manifests, configuration, seeds,
 backend mode, software environment, hardware identity, and immutable raw
-artifacts. The following are intentionally OPEN handoff fields for
-`$to-spec` and must not be filled by convention:
+artifacts. The reversible implementation and evaluation details formerly
+retained as handoff uncertainty are fixed in the
+[Stage-1 execution contract](stage-1-execution-contract.md). This includes
+the tokenizer/software tuple, inference controls, prompt and answer
+evaluation, output diagnostics, bootstrap procedure, target sets, static and
+planner contracts, artifact schemas and lineage, profiling, measurement
+scopes, gate ordering, final-data sealing, smoke mode, sharding, resume, and
+failure recovery.
 
-- exact tokenizer, Python/PyTorch/Transformers/TorchAO versions, and inference
-  controls;
-- prompt formatting, answer normalization, diagnostic positions, and hidden-
-  state measurement definitions;
-- bootstrap seed and replicate count;
-- static/profile tie handling, target-set construction, and causal
-  feature/embedding/upstream-context representation;
-- raw-artifact schema, profiling mode, prefetch schedule, measurement scopes,
-  and per-dimension budget ceilings.
+The following remain execution observations rather than choices: the actual
+GPU UUID selected per run, the subset `P_exec` that passes complete execution,
+the artifact hashes and locations, invalid-run outcomes, and which cost
+dimensions have valid common coverage. Hidden-state distance diagnostics and
+numeric per-dimension budget ceilings are explicitly excluded; an unavailable
+prefetch path is recorded as omitted/unavailable rather than zero.
 
 A missing field blocks or invalidates the corresponding evaluation path; it does
 not permit silent default selection.

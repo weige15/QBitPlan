@@ -82,13 +82,20 @@ gross oracle headroom alone. These are preferences, not source facts.
 
 ## Retained uncertainty and handoff boundary
 
-The exact tokenizer and software tuple, inference controls, prompt and answer
-normalization, diagnostic positions, bootstrap seed/replicate count,
-static-profile and feature tie handling, upstream-context representation,
-raw-artifact schema, profiling/prefetch procedures, measurement scopes, and
-per-dimension budget ceilings remain OPEN handoff fields. They must be fixed by
-the next specification work before corresponding evaluation; no value is
-inferred by convention here.
+At acceptance, the exact tokenizer and software tuple, inference controls,
+prompt and answer normalization, diagnostic positions, bootstrap seed/replicate
+count, static-profile and feature tie handling, upstream-context
+representation, raw-artifact schema, profiling/prefetch procedures,
+measurement scopes, and per-dimension budget ceilings were retained as OPEN
+handoff fields. No value was inferred by convention.
+
+## Handoff resolution
+
+The [Stage-1 execution contract](../protocol/stage-1-execution-contract.md)
+fixes or explicitly excludes every retained handoff field before `$to-spec`.
+It does not amend the scientific decisions in this ADR. Actual GPU UUIDs,
+`P_exec`, artifact hashes, invalid-run outcomes, and observed cost-dimension
+coverage remain execution records rather than preselected values.
 
 ## Related records
 

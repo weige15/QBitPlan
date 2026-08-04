@@ -96,6 +96,21 @@ A causal change from lower to higher precision for a future layer group.
 An offline bit profile selected using outcomes unavailable to the online
 controller. It estimates achievable headroom and is not an online controller.
 
+### Static profile
+
+A single query-independent executable bit profile frozen from permitted
+non-final evidence for use as a comparison baseline.
+
+### Feasible profile set
+
+The executable profiles whose aggregate degradation for a declared phase and
+dataset is at or below the accepted threshold.
+
+### Target set
+
+The query-specific subset of a feasible profile set whose execution is
+externally correct for that query.
+
 ### Hardware-executable profile
 
 A discrete bit profile that the declared execution backend can execute.
