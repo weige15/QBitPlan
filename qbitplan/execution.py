@@ -282,6 +282,18 @@ def execute_plan(
             raise ValueError("estimate-cost mode requires an explicit lookup adapter")
         from .stage1.lookup_execution import execute_lookup_plan
 
+    if experiment_plan.data["mode"] == "direct-cost":
+        from .stage1.direct_cost import DirectCostRunner, execute_direct_cost_plan
+
+        if executor is None:
+            from .stage1.executor import TorchAOProfileExecutor
+
+            executor = DirectCostRunner(
+                experiment_plan, TorchAOProfileExecutor(experiment_plan)
+            )
+        if not isinstance(executor, DirectCostRunner):
+            raise ValueError("direct-cost mode requires the DirectCostRunner adapter")
+        return execute_direct_cost_plan(experiment_plan, executor)
         return execute_lookup_plan(experiment_plan, executor)
     if executor is None:
         from .stage1.executor import TorchAOProfileExecutor

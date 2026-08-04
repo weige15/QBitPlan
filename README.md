@@ -68,3 +68,19 @@ The inventory is immutable executable-profile feasibility evidence only; it
 does not establish task quality, cost, latency, memory, systems benefit, or
 generalization.
 
+Issue #30 adds the fixed direct-cost smoke frame around the same real executor:
+
+```bash
+qbitplan stage1 run \
+  --plan /path/to/cost-smoke-plan.json \
+  --mode direct-cost \
+  --smoke \
+  --gpu-uuid GPU-UUID
+```
+
+The direct-cost bundle writes separate setup, cost-observation, trace, and
+cost-coverage artifacts. Valid cost dimensions are directly measured; missing
+NVML or trace coverage is recorded as `omitted/unavailable` and is never
+replaced with zero or lookup evidence. The bundle remains bounded to the
+pinned model, two-query smoke frame, four declared profiles, and selected GPU.
+

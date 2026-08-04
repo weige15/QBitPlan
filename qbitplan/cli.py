@@ -7,8 +7,9 @@ import json
 import sys
 from pathlib import Path
 
-from .execution import execute_plan
+from .execution import ProfileExecutor, execute_plan
 from .plan import ExperimentPlan
+from .stage1.direct_cost import DirectCostRunner
 from .stage1.executor import TorchAOProfileExecutor
 from .stage1.lookup import LookupCostEstimateAdapter
 
@@ -20,7 +21,10 @@ def _parser() -> argparse.ArgumentParser:
     stage1_commands = stage1.add_subparsers(dest="stage1_command", required=True)
     run = stage1_commands.add_parser("run")
     run.add_argument("--plan", type=Path, required=True)
-    run.add_argument("--mode", choices=("smoke", "functional-quality"), required=True)
+    run.add_argument("--smoke", action="store_true")
+    run.add_argument(
+        "--mode", choices=("smoke", "functional-quality", "direct-cost"), required=True
+    )
     run.add_argument("--gpu-uuid", required=True)
     estimate = stage1_commands.add_parser("estimate-cost")
     estimate.add_argument("--plan", type=Path, required=True)
@@ -52,7 +56,17 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("CLI mode does not match the plan mode")
             if plan.data["gpu_uuid"] != args.gpu_uuid:
                 raise ValueError("CLI GPU UUID does not match the plan GPU UUID")
-            bundle = execute_plan(plan, executor=TorchAOProfileExecutor(plan))
+            if args.mode == "direct-cost":
+                if not args.smoke:
+                    raise ValueError("direct-cost mode requires --smoke")
+                executor: ProfileExecutor = DirectCostRunner(
+                    plan, TorchAOProfileExecutor(plan)
+                )
+            else:
+                if args.smoke:
+                    raise ValueError("--smoke is only valid for direct-cost mode")
+                executor = TorchAOProfileExecutor(plan)
+            bundle = execute_plan(plan, executor=executor)
     except (FileExistsError, OSError, TypeError, ValueError, RuntimeError) as exc:
         print(f"qbitplan: rejected: {exc}", file=sys.stderr)
         return 2

@@ -318,8 +318,8 @@ class ExperimentPlan:
             raise ValueError("artifact_root must be an explicit non-empty path")
         if not isinstance(raw["attempt_id"], str) or not raw["attempt_id"]:
             raise ValueError("attempt_id must be explicit and non-empty")
-        if raw["mode"] not in {"smoke", "functional-quality"}:
-            raise ValueError("mode must be smoke or functional-quality")
+        if raw["mode"] not in {"smoke", "functional-quality", "direct-cost"}:
+            raise ValueError("mode must be smoke, functional-quality, or direct-cost")
         model = _require_mapping(raw["model"], "model")
         _require_exact_keys(model, {"identifier", "revision", "architecture", "layers", "dtype"}, "model")
         if model != {"identifier": MODEL_IDENTIFIER, "revision": MODEL_REVISION, "architecture": "LlamaForCausalLM", "layers": 32, "dtype": "bfloat16"}:
@@ -341,9 +341,9 @@ class ExperimentPlan:
         _validate_source_manifest(source_manifest)
         _validate_queries(raw["queries"], source_manifest)
         expected_profiles = (
-            list(EXPECTED_PROFILES)
-            if raw["mode"] == "smoke"
-            else list(ANALYTICAL_PROFILE_IDS)
+            list(ANALYTICAL_PROFILE_IDS)
+            if raw["mode"] == "functional-quality"
+            else list(EXPECTED_PROFILES)
         )
         if raw["profiles"] != expected_profiles:
             raise ValueError("profiles must match the declared mode's canonical profile scope")

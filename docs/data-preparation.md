@@ -67,3 +67,25 @@ lineage references to `profile-outcomes.ndjson`. Transform or complete-forward
 failure excludes only that profile and is retained as an explicit invalid
 outcome. This inventory does not produce quality, cost, latency, memory,
 systems-benefit, or generalization claims.
+
+## Direct-cost smoke frame
+
+Issue #30 uses a validated plan declaring `mode` as `direct-cost` and the same
+four smoke profiles. Run the fixed direct-cost frame on the selected UUID-pinned
+RTX 3090 with:
+
+```bash
+qbitplan stage1 run \
+  --plan /path/to/cost-smoke-plan.json \
+  --mode direct-cost \
+  --smoke \
+  --gpu-uuid GPU-UUID
+```
+
+The run separates model loading and profile transformation from query
+execution, performs five unprofiled warmups and ten synchronized measured
+repetitions, and writes one separate trace pass. Its immutable bundle contains
+`setup-observations.ndjson`, `cost-observations.ndjson`,
+`trace-observations.ndjson`, and `cost-coverage.ndjson` alongside the plan and
+run manifests. Only valid dimensions are directly measured; unavailable
+dimensions carry explicit omission reasons.
