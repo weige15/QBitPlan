@@ -43,6 +43,17 @@ class PreparedProfileExecutor(Protocol):
     ) -> Mapping[str, Any]: ...
 
 
+class MemoryProbeOperationError(RuntimeError):
+    """Preserve probe metadata when the measured operation itself fails."""
+
+    def __init__(
+        self, cause: Exception, observation: Mapping[str, Any]
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.observation = dict(observation)
+
+
 class MemoryProbe(Protocol):
     def measure(
         self, operation: Callable[[], T], **context: Any
@@ -166,6 +177,8 @@ class NvmlMemoryProbe:
         peak = [int(first.used)]
         samples = [1]
         sample_error: list[str] = []
+        operation_result: T | None = None
+        operation_error: Exception | None = None
 
         def sample() -> None:
             while not stop.wait(self.sample_interval_seconds):
@@ -182,7 +195,10 @@ class NvmlMemoryProbe:
         )
         worker.start()
         try:
-            result = operation()
+            try:
+                operation_result = operation()
+            except Exception as exc:  # noqa: BLE001
+                operation_error = exc
         finally:
             stop.set()
             worker.join()
@@ -193,12 +209,7 @@ class NvmlMemoryProbe:
             except Exception as exc:  # noqa: BLE001  # pragma: no cover - hardware dependent
                 sample_error.append(type(exc).__name__)
             pynvml.nvmlShutdown()
-        if sample_error:
-            return result, {
-                "status": "invalid",
-                "reason_code": f"NVML_SAMPLE_FAILED:{sample_error[0]}",
-            }
-        return result, {
+        observation: dict[str, Any] = {
             "status": "measured",
             "peak_device_used_bytes": peak[0],
             "baseline_device_used_bytes": int(first.used),
@@ -206,6 +217,19 @@ class NvmlMemoryProbe:
             "sample_interval_seconds": self.sample_interval_seconds,
             "method": "NVML device-used absolute peak",
         }
+        if sample_error:
+            observation = {
+                "status": "invalid",
+                "reason_code": f"NVML_SAMPLE_FAILED:{sample_error[0]}",
+                "peak_device_used_bytes": peak[0],
+                "baseline_device_used_bytes": int(first.used),
+                "sample_count": samples[0],
+                "sample_interval_seconds": self.sample_interval_seconds,
+            }
+        if operation_error is not None:
+            raise MemoryProbeOperationError(operation_error, observation) from operation_error
+        assert operation_result is not None
+        return operation_result, observation
 
 
 class CudaTraceProbe:
@@ -231,7 +255,7 @@ class CudaTraceProbe:
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
                 record_shapes=False,
-                profile_memory=True,
+                profile_memory=False,
                 with_stack=False,
             ) as profiler:
                 operation_started = True
@@ -239,19 +263,36 @@ class CudaTraceProbe:
                 operation_completed = True
                 profiler.step()
             events = []
-            for event in profiler.events() or []:
-                events.append(
-                    {
-                        "name": event.name,
-                        "device_time_ns": int(event.cuda_time_total * 1000),
-                        "cpu_time_ns": int(event.self_cpu_time_total * 1000),
-                    }
+            for event in profiler.key_averages() or []:
+                device_time_us = getattr(event, "device_time_total", None)
+                if device_time_us is None:
+                    device_time_us = getattr(event, "cuda_time_total", None)
+                event_record: dict[str, Any] = {
+                    "name": event.name,
+                    "cpu_time_ns": int(event.self_cpu_time_total * 1000),
+                }
+                if device_time_us is not None:
+                    event_record["device_time_ns"] = int(device_time_us * 1000)
+                events.append(event_record)
+            omitted_dimensions = {
+                dimension: {
+                    "status": "omitted/unavailable",
+                    "reason": "TRACE_ANNOTATION_UNAVAILABLE",
+                    "evidence_class": DIRECT_EVIDENCE_CLASS,
+                }
+                for dimension in (
+                    "host_to_device_bytes",
+                    "prefetch_stall_time",
+                    "kernel_switch_count",
                 )
+            }
             return result, {
                 "status": "complete",
                 "events": events,
-                "method": "PyTorch CUDA profiler trace",
-                "dimension_coverage": {},
+                "method": "PyTorch CUDA profiler key-average trace",
+                "trace_representation": "bounded_key_averages",
+                "dimension_coverage": omitted_dimensions,
+                "tracer_overhead": _omitted("PROFILER_OVERHEAD_NOT_SEPARABLE"),
             }
         except Exception as exc:
             if not operation_started:
@@ -265,6 +306,27 @@ class CudaTraceProbe:
                 "status": "invalid",
                 "reason_code": f"CUDA_TRACE_FAILED:{type(exc).__name__}",
             }
+
+
+def _synchronize_cuda() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _cuda_events() -> tuple[Any | None, Any | None]:
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None, None
+        return torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+            enable_timing=True
+        )
+    except (ImportError, RuntimeError):
+        return None, None
 
 
 class DirectCostRunner:
@@ -306,9 +368,29 @@ class DirectCostRunner:
         if variant_id in self._preparations:
             return self._preparations[variant_id]
         started = self.monotonic_ns()
+        setup_memory: Mapping[str, Any] = {
+            "status": "not_attempted",
+            "reason_code": "SETUP_MEMORY_NOT_MEASURED",
+        }
         preparation: dict[str, Any]
         try:
-            preparation = dict(self.executor.prepare_variant(variant_id))
+            prepared, setup_memory = self.memory_probe.measure(
+                lambda: self.executor.prepare_variant(variant_id),
+                phase="setup",
+                variant_id=variant_id,
+            )
+            preparation = dict(prepared)
+        except MemoryProbeOperationError as exc:
+            preparation = {
+                "status": "invalid",
+                "reason_code": f"PREPARATION_EXCEPTION:{type(exc.cause).__name__}",
+                "transform_status": "invalid"
+                if variant_id != "BF16"
+                else "not_applicable",
+                "forward_status": "not_attempted",
+                "failure_phase": "setup",
+            }
+            setup_memory = exc.observation
         except (
             RuntimeError,
             ValueError,
@@ -322,11 +404,17 @@ class DirectCostRunner:
             preparation = {
                 "status": "invalid",
                 "reason_code": f"PREPARATION_EXCEPTION:{type(exc).__name__}",
+                "transform_status": "invalid"
+                if variant_id != "BF16"
+                else "not_applicable",
+                "forward_status": "not_attempted",
+                "failure_phase": "setup",
             }
         preparation.setdefault("status", "invalid")
         preparation.setdefault("reason_code", "PREPARATION_FAILED")
         preparation["evidence_class"] = DIRECT_EVIDENCE_CLASS
         preparation["preparation_elapsed_ns"] = self.monotonic_ns() - started
+        preparation["setup_memory_observation"] = dict(setup_memory)
         self._preparations[variant_id] = preparation
         return preparation
 
@@ -338,6 +426,7 @@ class DirectCostRunner:
             )
 
         latencies: list[int] = []
+        device_latencies: list[int] = []
         memory_observations: list[Mapping[str, Any]] = []
         last_result: Mapping[str, Any] = _invalid_execution("NO_EXECUTION")
         for _ in range(WARMUP_COUNT):
@@ -359,13 +448,28 @@ class DirectCostRunner:
         for repetition in range(MEASURED_COUNT):
             latency_observation: list[int] = []
 
+            device_latency_observation: list[int] = []
+
             def timed_operation(
                 record: list[int] = latency_observation,
+                device_record: list[int] = device_latency_observation,
             ) -> Mapping[str, Any]:
+                _synchronize_cuda()
                 started = self.monotonic_ns()
-                result = self.executor.execute_prepared(query, variant_id)
-                record.append(self.monotonic_ns() - started)
-                return result
+                cuda_start, cuda_end = _cuda_events()
+                if cuda_start is not None:
+                    cuda_start.record()
+                try:
+                    return self.executor.execute_prepared(query, variant_id)
+                finally:
+                    if cuda_end is not None:
+                        cuda_end.record()
+                    _synchronize_cuda()
+                    record.append(self.monotonic_ns() - started)
+                    if cuda_start is not None and cuda_end is not None:
+                        device_record.append(
+                            int(cuda_start.elapsed_time(cuda_end) * 1_000_000)
+                        )
 
             try:
                 last_result, memory = self.memory_probe.measure(
@@ -384,6 +488,8 @@ class DirectCostRunner:
                     query, variant_id, "MEASUREMENT_ADAPTER_EXECUTION_COUNT_INVALID"
                 )
             latencies.append(latency_observation[0])
+            if len(device_latency_observation) == 1:
+                device_latencies.append(device_latency_observation[0])
             memory_observations.append(memory)
             if last_result["status"] != "complete":
                 return self._invalid_observation(
@@ -430,9 +536,16 @@ class DirectCostRunner:
                 "measured_count": MEASURED_COUNT,
                 "trace_pass_count": TRACE_PASS_COUNT,
                 "latency_ns": latencies,
+                "device_latency_ns": device_latencies,
                 "median_latency_ns": int(statistics.median(latencies)),
+                "median_device_latency_ns": (
+                    int(statistics.median(device_latencies))
+                    if device_latencies
+                    else None
+                ),
             },
             "preparation": preparation,
+            "memory_observations": [dict(observation) for observation in memory_observations],
             "cost_vector": cost_vector,
             "trace_observation": trace_observation,
         }

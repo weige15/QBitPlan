@@ -15,6 +15,7 @@ import os
 import random
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -23,10 +24,17 @@ from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
 
 
 class _ExecutionFailure(RuntimeError):
-    def __init__(self, reason_code: str, *, transform: bool = False) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        transform: bool = False,
+        phase: str | None = None,
+    ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
         self.transform = transform
+        self.phase = phase
 
 
 class TorchAOProfileExecutor:
@@ -40,7 +48,8 @@ class TorchAOProfileExecutor:
         self._tokenizer: Any | None = None
         self._active_variant: str | None = None
         self._active_model: Any | None = None
-        self._profile_failures: dict[str, _ExecutionFailure] = {}
+        self._profile_failures: dict[str, tuple[str, bool, str | None]] = {}
+        self._preparation_details: dict[str, dict[str, Any]] = {}
 
     def hardware_identity(self) -> Mapping[str, Any]:
         return dict(self._resolve_device())
@@ -48,9 +57,10 @@ class TorchAOProfileExecutor:
     def prepare_variant(self, variant_id: str) -> Mapping[str, Any]:
         """Load and transform one profile without executing a query."""
 
+        self._preparation_details.pop(variant_id, None)
         try:
             self._model_for_variant(variant_id)
-            return {
+            preparation: dict[str, Any] = {
                 "status": "complete",
                 "reason_code": "PREPARED",
                 "transform_status": "not_applicable"
@@ -59,12 +69,14 @@ class TorchAOProfileExecutor:
                 "forward_status": "not_attempted",
             }
         except _ExecutionFailure as exc:
-            return {
+            preparation = {
                 "status": "invalid",
                 "reason_code": exc.reason_code,
                 "transform_status": "invalid" if exc.transform else "complete",
                 "forward_status": "not_attempted",
             }
+            if exc.phase is not None:
+                preparation["failure_phase"] = exc.phase
         except (
             RuntimeError,
             ValueError,
@@ -75,14 +87,19 @@ class TorchAOProfileExecutor:
             AttributeError,
             MemoryError,
         ) as exc:
-            return {
+            preparation = {
                 "status": "invalid",
                 "reason_code": f"PREPARATION_EXCEPTION:{type(exc).__name__}",
                 "transform_status": "invalid"
                 if variant_id != "BF16"
                 else "not_applicable",
                 "forward_status": "not_attempted",
+                "failure_phase": "setup",
             }
+        preparation["preparation_phases"] = self._preparation_details.pop(
+            variant_id, {}
+        )
+        return preparation
 
     def execute_prepared(
         self, query: Mapping[str, Any], variant_id: str
@@ -166,11 +183,37 @@ class TorchAOProfileExecutor:
                 continue
             index, name, uuid, driver = (item.strip() for item in row)
             if uuid == gpu_uuid:
+                physical_index = int(index)
+                visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+                logical_index: int | None
+                if visible is None or not visible.strip():
+                    logical_index = physical_index
+                else:
+                    visible_tokens = [
+                        token.strip()
+                        for token in visible.split(",")
+                        if token.strip() and token.strip() != "-1"
+                    ]
+                    if gpu_uuid in visible_tokens:
+                        logical_index = visible_tokens.index(gpu_uuid)
+                    else:
+                        logical_index = next(
+                            (
+                                logical
+                                for logical, token in enumerate(visible_tokens)
+                                if token.isdigit() and int(token) == physical_index
+                            ),
+                            None,
+                        )
+                    if logical_index is None:
+                        raise _ExecutionFailure("GPU_UUID_NOT_VISIBLE")
                 selected = {
-                    "device_index": int(index),
+                    "device_index": logical_index,
+                    "physical_device_index": physical_index,
                     "gpu_name": name,
                     "gpu_uuid": uuid,
                     "driver_version": driver,
+                    "cuda_visible_devices": visible or "unset",
                 }
                 break
         if selected is None:
@@ -186,6 +229,12 @@ class TorchAOProfileExecutor:
             if selected["device_index"] >= torch.cuda.device_count():
                 raise _ExecutionFailure("GPU_DEVICE_INDEX_UNAVAILABLE")
             torch.cuda.set_device(selected["device_index"])
+            get_properties = getattr(torch.cuda, "get_device_properties", None)
+            if callable(get_properties):
+                properties = get_properties(selected["device_index"])
+                actual_uuid = getattr(properties, "uuid", None)
+                if actual_uuid is not None and str(actual_uuid) != gpu_uuid:
+                    raise _ExecutionFailure("GPU_UUID_RUNTIME_MISMATCH")
             self._apply_determinism(torch)
         except ImportError as exc:
             raise _ExecutionFailure("PYTORCH_UNAVAILABLE") from exc
@@ -265,57 +314,133 @@ class TorchAOProfileExecutor:
         if variant_id != "BF16" and variant_id not in self.plan.data["profiles"]:
             raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
         if variant_id in self._profile_failures:
-            raise self._profile_failures[variant_id]
+            reason_code, transform, phase = self._profile_failures[variant_id]
+            raise _ExecutionFailure(
+                reason_code, transform=transform, phase=phase
+            )
         if self._active_variant == variant_id and self._active_model is not None:
             return self._active_model
         self._release_model()
+        details = self._preparation_details.setdefault(
+            variant_id,
+            {
+                "placement": "cpu-before-device-transfer",
+                "phase_status": "in_progress",
+            },
+        )
         try:
             import torch
             from transformers import AutoModelForCausalLM
-        except ImportError as exc:
-            failure = _ExecutionFailure("MODEL_RUNTIME_UNAVAILABLE")
-            self._profile_failures[variant_id] = failure
-            raise failure from exc
+        except ImportError:
+            failure = _ExecutionFailure("MODEL_RUNTIME_UNAVAILABLE", phase="setup")
+            self._profile_failures[variant_id] = (
+                failure.reason_code,
+                failure.transform,
+                failure.phase,
+            )
+            raise failure from None
         device_info = self._resolve_device()
         device = torch.device("cuda", device_info["device_index"])
+        details["device_index"] = device_info["device_index"]
         try:
-            model = cast(
-                Any,
-                AutoModelForCausalLM.from_pretrained(
-                    MODEL_IDENTIFIER,
-                    revision=MODEL_REVISION,
-                    torch_dtype=torch.bfloat16,
-                    trust_remote_code=False,
-                ),
-            )
-            model.eval()
+            stage_started = time.perf_counter_ns()
+            details["active_phase"] = "model_load"
+            try:
+                model = cast(
+                    Any,
+                    AutoModelForCausalLM.from_pretrained(
+                        MODEL_IDENTIFIER,
+                        revision=MODEL_REVISION,
+                        torch_dtype=torch.bfloat16,
+                        trust_remote_code=False,
+                    ),
+                )
+                model.eval()
+            finally:
+                details["model_load_ns"] = time.perf_counter_ns() - stage_started
+
             if variant_id != "BF16":
-                self._transform_profile(model, variant_id)
-            self._validate_group_structure(model)
-            model.to(device)
+                stage_started = time.perf_counter_ns()
+                details["active_phase"] = "quantization"
+                try:
+                    self._transform_profile(model, variant_id)
+                finally:
+                    details["quantization_ns"] = (
+                        time.perf_counter_ns() - stage_started
+                    )
+
+            stage_started = time.perf_counter_ns()
+            details["active_phase"] = "group_validation"
+            try:
+                self._validate_group_structure(model)
+            finally:
+                details["group_validation_ns"] = (
+                    time.perf_counter_ns() - stage_started
+                )
+
+            stage_started = time.perf_counter_ns()
+            details["active_phase"] = "device_transfer"
+            try:
+                model.to(device)
+            finally:
+                details["device_transfer_ns"] = (
+                    time.perf_counter_ns() - stage_started
+                )
+
             if variant_id != "BF16":
-                self._validate_quantized_representation(model, variant_id, device)
+                stage_started = time.perf_counter_ns()
+                details["active_phase"] = "representation_validation"
+                try:
+                    self._validate_quantized_representation(model, variant_id, device)
+                finally:
+                    details["representation_validation_ns"] = (
+                        time.perf_counter_ns() - stage_started
+                    )
         except _ExecutionFailure as exc:
-            self._profile_failures[variant_id] = exc
+            if exc.phase is None:
+                exc.phase = str(details.get("active_phase", "setup"))
+            self._profile_failures[variant_id] = (
+                exc.reason_code,
+                exc.transform,
+                exc.phase,
+            )
             self._release_model()
             raise
         except RuntimeError as exc:
+            phase = str(details.get("active_phase", "setup"))
             reason = (
                 "OOM"
                 if "out of memory" in str(exc).lower()
                 else "TRANSFORM_OR_LOAD_RUNTIME_ERROR"
             )
-            failure = _ExecutionFailure(reason, transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
-            raise failure from exc
-        except OSError as exc:
             failure = _ExecutionFailure(
-                "MODEL_LOAD_FAILED", transform=variant_id != "BF16"
+                reason,
+                transform=variant_id != "BF16",
+                phase=phase,
             )
-            self._profile_failures[variant_id] = failure
+            self._profile_failures[variant_id] = (
+                failure.reason_code,
+                failure.transform,
+                failure.phase,
+            )
             self._release_model()
-            raise failure from exc
+            raise failure from None
+        except OSError:
+            phase = str(details.get("active_phase", "model_load"))
+            failure = _ExecutionFailure(
+                "MODEL_LOAD_FAILED",
+                transform=variant_id != "BF16",
+                phase=phase,
+            )
+            self._profile_failures[variant_id] = (
+                failure.reason_code,
+                failure.transform,
+                failure.phase,
+            )
+            self._release_model()
+            raise failure from None
+        details["phase_status"] = "complete"
+        details.pop("active_phase", None)
         self._active_variant = variant_id
         self._active_model = model
         return model
