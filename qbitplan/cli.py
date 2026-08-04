@@ -6,9 +6,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
-from .stage1 import ExperimentPlan, execute_plan
-from .stage1.executor import RuntimeDependencyError, TorchAOProfileExecutor
+
+from .execution import execute_plan
+from .plan import ExperimentPlan
+from .stage1.executor import TorchAOProfileExecutor
+from .stage1.lookup import LookupCostEstimateAdapter
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -17,8 +19,6 @@ def _parser() -> argparse.ArgumentParser:
     stage1 = commands.add_parser("stage1")
     stage1_commands = stage1.add_subparsers(dest="stage1_command", required=True)
     run = stage1_commands.add_parser("run")
-    run.add_argument("--plan", required=True)
-    run.add_argument("--mode", required=True, choices=("smoke",))
     run.add_argument("--plan", type=Path, required=True)
     run.add_argument("--mode", choices=("smoke", "functional-quality"), required=True)
     run.add_argument("--gpu-uuid", required=True)
@@ -28,52 +28,46 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_plan(path: Path) -> ExperimentPlan:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise TypeError("experiment plan must be a JSON object")
+    return ExperimentPlan.from_mapping(value)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command != "stage1" or args.stage1_command != "run":
-        raise AssertionError("unreachable command parser state")
     try:
-        plan = ExperimentPlan.from_json_file(args.plan)
-        if plan.mode != args.mode:
-            raise ValueError("CLI mode does not match the plan mode")
-        if plan.data["hardware"]["gpu_uuid"] != args.gpu_uuid:
-            raise ValueError("CLI GPU UUID does not match the plan GPU UUID")
-        executor = TorchAOProfileExecutor(plan)
-        bundle = execute_plan(plan, executor)
-    except (FileExistsError, OSError, RuntimeDependencyError, ValueError, RuntimeError) as exc:
-        print(f"qbitplan: run rejected: {exc}", file=sys.stderr)
-        with args.plan.open("r", encoding="utf-8") as handle:
-            plan: dict[str, Any] = json.load(handle)
-        if not isinstance(plan, dict):
-            raise ValueError("experiment plan must be a JSON object")
+        plan = _load_plan(args.plan)
         if args.stage1_command == "estimate-cost":
-            if plan.get("mode") != "estimate-cost":
+            if plan.data["mode"] != "estimate-cost":
                 raise ValueError("estimate-cost plan must declare mode estimate-cost")
-            from .stage1.lookup import LookupCostEstimateAdapter
             bundle = execute_plan(
                 plan,
                 executor=LookupCostEstimateAdapter.from_path(args.lookup),
             )
         else:
-            if plan.get("mode") != args.mode:
-                raise ValueError("CLI mode does not match the explicit plan mode")
-            if "gpu_uuid" in plan and plan["gpu_uuid"] != args.gpu_uuid:
-                raise ValueError("CLI GPU UUID does not match the explicit plan GPU UUID")
-            plan["gpu_uuid"] = args.gpu_uuid
-            bundle = execute_plan(plan)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+            if plan.data["mode"] != args.mode:
+                raise ValueError("CLI mode does not match the plan mode")
+            if plan.data["gpu_uuid"] != args.gpu_uuid:
+                raise ValueError("CLI GPU UUID does not match the plan GPU UUID")
+            bundle = execute_plan(plan, executor=TorchAOProfileExecutor(plan))
+    except (FileExistsError, OSError, TypeError, ValueError, RuntimeError) as exc:
         print(f"qbitplan: rejected: {exc}", file=sys.stderr)
-
         return 2
 
+    metadata = json.loads((bundle.path / "bundle.json").read_text(encoding="utf-8"))
     print(
         json.dumps(
             {
-                "artifact_id": bundle.artifact_id,
-                "artifact_root": str(bundle.root),
-                "manifest_id": bundle.manifest_id,
+                "artifact_id": bundle.files["bundle.json"],
+                "artifact_root": str(plan.artifact_root),
+                "bundle_path": str(bundle.path),
+                "bundle_id": bundle.bundle_id,
+                "manifest_id": metadata["source_manifest_id"],
                 "run_id": bundle.run_id,
-                "claim_boundary": bundle.payload["claim_boundary"],
+                "claim_boundary": metadata["claim_scope"],
             },
             sort_keys=True,
         )

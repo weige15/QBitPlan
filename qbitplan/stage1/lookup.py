@@ -155,6 +155,10 @@ class LookupCostEstimateAdapter:
             query_id = _require_nonempty_string(entry["query_id"], "lookup entry query_id")
             profile_id = _profile_id(entry["profile_id"], "lookup entry profile_id")
             key = (query_id, profile_id)
+            if query_id not in query_ids or profile_id not in profile_ids:
+                raise ValueError(
+                    f"lookup entry {key!r} is outside the declared coverage manifest"
+                )
             if key in seen:
                 raise ValueError(f"lookup table contains duplicate entry {key!r}")
             seen.add(key)

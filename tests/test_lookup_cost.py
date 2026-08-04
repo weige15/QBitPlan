@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from test_experiment_seam import _patch_synthetic_manifest_constants, _plan
 
 from qbitplan import execute_plan
@@ -104,6 +105,25 @@ def test_lookup_estimate_bundle_preserves_coverage_and_omissions(
         for dimension in row["cost_vector"].values()
         if dimension["status"] == "omitted/unavailable"
     )
+
+
+def test_lookup_adapter_rejects_entries_outside_declared_coverage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    table = _lookup_table()
+    table["entries"].append(
+        {
+            "query_id": "test/1.json",
+            "profile_id": "11111111",
+            "costs": {"latency": 1},
+        }
+    )
+    table_path = tmp_path / "out-of-coverage.json"
+    table_path.write_text(json.dumps(table), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside the declared coverage manifest"):
+        LookupCostEstimateAdapter.from_path(table_path)
 
 
 def test_lookup_adapter_rejects_a_directly_measured_declaration(
