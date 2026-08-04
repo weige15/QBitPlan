@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from .identity import canonical_json_bytes, sha256_bytes, sha256_canonical
 from .plan import ExperimentPlan
@@ -100,13 +100,13 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
     missing = sorted(required - set(observation))
     if missing:
         raise ValueError(f"executor observation is missing fields: {missing}")
-    if observation["status"] not in {"complete", "invalid"}:
+    if observation["status"] not in {"complete", "invalid", "incomplete", "aborted"}:
         raise ValueError("executor observation has an unsupported terminal status")
     if observation["transform_status"] not in {"complete", "invalid", "not_applicable"}:
         raise ValueError("executor observation has an unsupported transform status")
     if observation["forward_status"] not in {"complete", "invalid", "not_attempted"}:
         raise ValueError("executor observation has an unsupported forward status")
-    if observation["status"] == "invalid" and (not isinstance(observation["reason_code"], str) or not observation["reason_code"]):
+    if observation["status"] in {"invalid", "incomplete", "aborted"} and (not isinstance(observation["reason_code"], str) or not observation["reason_code"]):
         raise ValueError("executor observation requires a non-empty reason code")
     prefix = observation["observed_group_prefix"]
     if not isinstance(prefix, list):
@@ -125,7 +125,7 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("complete observation has an incomplete forward")
         if [entry["group_index"] for entry in prefix] != list(range(8)):
             raise ValueError("complete observation has an incomplete group order")
-    elif observation["forward_status"] == "complete":
+    elif observation["status"] == "invalid" and observation["forward_status"] == "complete":
         raise ValueError("invalid observation has a complete forward")
     return dict(observation)
 
@@ -336,6 +336,7 @@ def execute_plan(
 
     outcomes: list[dict[str, Any]] = []
     boundaries: list[dict[str, Any]] = []
+    observations_cache: dict[tuple[str, str], dict[str, Any]] = {}
     queries = experiment_plan.data["queries"]
     for query in queries:
         for variant_id in experiment_plan.data["profiles"]:
@@ -343,6 +344,7 @@ def execute_plan(
                 observation = _observation_fields(executor.execute(query, variant_id))
             except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
                 observation = _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
+            observations_cache[(query["query_id"], variant_id)] = observation
             outcome = {
                 **_lineage(
                     artifact_type="profile-outcome",
@@ -396,6 +398,70 @@ def execute_plan(
                     }
                 )
 
+    quality_run = None
+    quality_records: list[dict[str, Any]] = []
+    diagnostic_records: list[dict[str, Any]] = []
+    quality_summary: dict[str, Any] | None = None
+    if experiment_plan.data["mode"] == "functional-quality":
+        from types import SimpleNamespace
+
+        from .stage1.quality import FunctionalQualityRunner, QualityExecutor
+
+        def quality_execute(
+            query: Mapping[str, Any], variant_id: str
+        ) -> Mapping[str, Any]:
+            key = (query["query_id"], variant_id)
+            if key not in observations_cache:
+                try:
+                    observations_cache[key] = _observation_fields(
+                        executor.execute(query, variant_id)
+                    )
+                except (
+                    RuntimeError,
+                    ValueError,
+                    OSError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    AttributeError,
+                    MemoryError,
+                ) as exc:
+                    observations_cache[key] = _invalid_observation(
+                        f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
+                    )
+            return observations_cache[key]
+
+        def quality_diagnostic(
+            query: Mapping[str, Any], variant_id: str, tokens: list[int]
+        ) -> Mapping[str, Any]:
+            method = getattr(executor, "teacher_forced_diagnostic", None)
+            if not callable(method):
+                raise RuntimeError("DIAGNOSTIC_ADAPTER_UNAVAILABLE")  # noqa: TRY004
+            return cast(Mapping[str, Any], method(query, variant_id, tokens))
+
+        quality_executor = cast(
+            QualityExecutor,
+            SimpleNamespace(
+                evidence_class=evidence_class,
+                execute=quality_execute,
+                teacher_forced_diagnostic=quality_diagnostic,
+            ),
+        )
+        quality_run = FunctionalQualityRunner(experiment_plan, quality_executor).run()
+        quality_records = [
+            {**record, "producer_git_sha": producer_git_sha, "created_at": created_at}
+            for record in quality_run.quality_records
+        ]
+        diagnostic_records = [
+            {**record, "producer_git_sha": producer_git_sha, "created_at": created_at}
+            for record in quality_run.diagnostic_records
+        ]
+        quality_summary = {
+            **quality_run.summary,
+            "producer_git_sha": producer_git_sha,
+            "created_at": created_at,
+        }
+
     profile_inventory = None
     if experiment_plan.data["mode"] == "functional-quality":
         profile_inventory = _build_profile_inventory(
@@ -440,6 +506,10 @@ def execute_plan(
     }
     if profile_inventory is not None:
         file_contents["profile-inventory.json"] = _canonical_json_file(profile_inventory)
+    if quality_run is not None and quality_summary is not None:
+        file_contents["quality-outcomes.ndjson"] = _canonical_ndjson(quality_records)
+        file_contents["quality-diagnostics.ndjson"] = _canonical_ndjson(diagnostic_records)
+        file_contents["quality-summary.json"] = _canonical_json_file(quality_summary)
     file_hashes: dict[str, str] = {}
     for filename, content in file_contents.items():
         file_hashes[filename] = _write_once(bundle_path / filename, content)
@@ -476,6 +546,7 @@ def execute_plan(
         "run_id": run_id,
         "plan_id": plan_id,
         "claim_scope": bundle_claim_scope,
+        "quality_claim_scope": ("omitted" if is_smoke else "pinned functional-quality evidence: external correctness, BF16-relative degradation, and separately labeled output diagnostics"),
         "non_evidentiary": is_smoke,
         "files": [*file_contents, "bundle.json"],
         "artifact_index_file": "artifact-index.json",
@@ -484,7 +555,7 @@ def execute_plan(
         "file_hash_scope": "payload files; artifact-index.json records bundle.json and payload hashes",
         "hardware_identity": hardware_identity,
         "evidence_boundary": {
-            "quality": "omitted",
+            "quality": ("omitted" if is_smoke else "external task correctness, BF16-relative degradation, and separately labeled output diagnostics"),
             "cost": cost_boundary,
             "systems_benefit": "omitted",
             "generalization": "omitted",

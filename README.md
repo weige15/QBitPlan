@@ -64,9 +64,10 @@ The accepted Stage-1 contract and its execution seam are implemented for issues
 For the issue-26 profile inventory, use a validated functional-quality plan
 with the complete canonical profile list and run
 `qbitplan stage1 run --plan <functional-plan> --mode functional-quality --gpu-uuid <uuid>`.
-The inventory is immutable executable-profile feasibility evidence only; it
-does not establish task quality, cost, latency, memory, systems benefit, or
-generalization.
+The bundle also contains paired functional-quality outcome and diagnostic artifacts
+for BF16 plus every executable profile. These records provide pinned external
+correctness, BF16-relative degradation, and separately labeled output diagnostics;
+they do not establish cost, latency, memory, systems benefit, or generalization.
 
 Issue #30 adds the fixed direct-cost smoke frame around the same real executor:
 

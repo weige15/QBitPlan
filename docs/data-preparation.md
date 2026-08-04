@@ -65,8 +65,11 @@ The resulting write-once bundle contains `profile-inventory.json` with all
 256 attempts, sorted `P_exec`, exclusion reason codes, evidence classes, and
 lineage references to `profile-outcomes.ndjson`. Transform or complete-forward
 failure excludes only that profile and is retained as an explicit invalid
-outcome. This inventory does not produce quality, cost, latency, memory,
-systems-benefit, or generalization claims.
+outcome. Issue #27 additionally writes paired functional-quality outcomes and
+separately labeled teacher-forced diagnostic records for BF16 and every profile.
+Those records provide external correctness and BF16-relative degradation only;
+they do not produce cost, latency, memory, systems-benefit, or generalization
+claims.
 
 ## Direct-cost smoke frame
 
