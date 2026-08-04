@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import hashlib
 import json
 import math
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -19,9 +19,7 @@ def _canonical_value(value: Any) -> Any:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise CanonicalizationError("canonical JSON does not accept non-finite numbers")
-        if not value.is_integer():
-            raise CanonicalizationError("canonical JSON only accepts integral numbers")
-        return int(value)
+        return int(value) if value.is_integer() else value
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise CanonicalizationError("canonical JSON object keys must be strings")

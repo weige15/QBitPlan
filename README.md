@@ -56,3 +56,15 @@ and per-profile/query transform and forward statuses. Unsupported transforms,
 incomplete forwards, context overflow, non-finite output, OOM, and other
 runtime failures are recorded with explicit invalid statuses and reason codes;
 no fallback profile is substituted.
+
+The accepted Stage-1 contract and its execution seam are implemented for issues
+#25 and #26. Build an explicit smoke plan with
+[the data-preparation command](docs/data-preparation.md), then run
+`qbitplan stage1 run --plan <smoke-plan> --mode smoke --gpu-uuid <uuid>`.
+For the issue-26 profile inventory, use a validated functional-quality plan
+with the complete canonical profile list and run
+`qbitplan stage1 run --plan <functional-plan> --mode functional-quality --gpu-uuid <uuid>`.
+The inventory is immutable executable-profile feasibility evidence only; it
+does not establish task quality, cost, latency, memory, systems benefit, or
+generalization.
+

@@ -44,3 +44,26 @@ only after deliberately reviewing an existing artifact.
 
 The existing combined 12,500-row Parquet cache is intentionally not accepted:
 its provenance does not verify the original split or source-relative IDs.
+
+## 256-profile inventory
+
+Issue #26 reuses the same `ExperimentPlan` → `ArtifactBundle` seam with
+`mode` set to `functional-quality` and `profiles` set, explicitly and before
+execution, to the canonical IDs `00000000` through `11111111` in lexicographic
+order. The scientific CLI accepts this mode:
+
+```bash
+qbitplan stage1 run \
+  --plan /path/to/functional-plan.json \
+  --mode functional-quality \
+  --gpu-uuid GPU-UUID
+```
+
+The plan must still provide the accepted model, tokenizer, software, runtime,
+source-manifest, and permitted query fields; missing defaults are rejected.
+The resulting write-once bundle contains `profile-inventory.json` with all
+256 attempts, sorted `P_exec`, exclusion reason codes, evidence classes, and
+lineage references to `profile-outcomes.ndjson`. Transform or complete-forward
+failure excludes only that profile and is retained as an explicit invalid
+outcome. This inventory does not produce quality, cost, latency, memory,
+systems-benefit, or generalization claims.

@@ -173,8 +173,13 @@ def _plan(root: Path, *, attempt_id: str = "attempt-0001") -> dict[str, Any]:
 class FakeExecutor:
     evidence_class = "simulated"
 
-    def __init__(self, failing_profile: str | None = None) -> None:
+    def __init__(
+        self,
+        failing_profile: str | None = None,
+        failing_forward_profile: str | None = None,
+    ) -> None:
         self.failing_profile = failing_profile
+        self.failing_forward_profile = failing_forward_profile
 
     def hardware_identity(self) -> dict[str, str]:
         return {"gpu_uuid": "test-gpu-uuid", "gpu_name": "test adapter"}
@@ -188,6 +193,16 @@ class FakeExecutor:
                 "reason_code": "TRANSFORM_UNSUPPORTED",
                 "transform_reason_code": "TRANSFORM_UNSUPPORTED",
                 "forward_reason_code": "TRANSFORM_FAILED",
+                "observed_group_prefix": [],
+            }
+        if variant_id == self.failing_forward_profile:
+            return {
+                "status": "invalid",
+                "transform_status": "complete",
+                "forward_status": "invalid",
+                "reason_code": "FORWARD_NON_FINITE",
+                "transform_reason_code": None,
+                "forward_reason_code": "FORWARD_NON_FINITE",
                 "observed_group_prefix": [],
             }
         profile_bits = "00000000" if variant_id == "BF16" else variant_id
@@ -267,6 +282,90 @@ def test_profile_transform_failure_is_immutable_and_has_no_substitute(tmp_path: 
         "11111111",
         "01010101",
     }
+
+
+def test_functional_quality_inventory_attempts_all_canonical_profiles(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    plan["mode"] = "functional-quality"
+    plan["profiles"] = [f"{profile_id:08b}" for profile_id in range(256)]
+
+    bundle = execute_plan(plan, executor=FakeExecutor())
+
+    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    expected_profiles = [f"{profile_id:08b}" for profile_id in range(256)]
+    assert inventory["profile_ids"] == expected_profiles
+    assert inventory["p_exec"] == expected_profiles
+    assert inventory["enumeration_evidence_class"] == "analytical"
+    assert inventory["outcome_evidence_classes"] == ["simulated"]
+    assert inventory["source_manifest_id"] == _source_manifest()["manifest_id"]
+    assert inventory["outcome_file"] == "profile-outcomes.ndjson"
+    assert inventory["outcome_record_count"] == 2 * 256
+
+    bundle_metadata = json.loads((bundle.path / "bundle.json").read_text(encoding="utf-8"))
+    assert bundle_metadata["claim_scope"] == "executable profile feasibility inventory only"
+    assert bundle_metadata["non_evidentiary"] is False
+    assert "profile-inventory.json" in bundle_metadata["files"]
+    artifact_index = json.loads((bundle.path / "artifact-index.json").read_text(encoding="utf-8"))
+    assert "profile-inventory.json" in artifact_index["file_hashes"]
+
+    outcomes = [
+        json.loads(line)
+        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(outcomes) == 2 * 256
+    assert {row["variant_id"] for row in outcomes} == set(expected_profiles)
+    assert len((bundle.path / "group-boundaries.ndjson").read_text(encoding="utf-8").splitlines()) == 2 * 256 * 8
+
+
+def test_functional_quality_inventory_excludes_only_failed_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    plan["mode"] = "functional-quality"
+    plan["profiles"] = [f"{profile_id:08b}" for profile_id in range(256)]
+
+    bundle = execute_plan(plan, executor=FakeExecutor("00000000"))
+
+    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    assert "00000000" not in inventory["p_exec"]
+    assert len(inventory["p_exec"]) == 255
+    assert inventory["excluded_profiles"] == [
+        {
+            "profile_id": "00000000",
+            "reason_code": "TRANSFORM_UNSUPPORTED",
+        }
+    ]
+
+
+def test_functional_quality_inventory_excludes_forward_failure_without_substitute(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    plan["mode"] = "functional-quality"
+    plan["profiles"] = [f"{profile_id:08b}" for profile_id in range(256)]
+
+    bundle = execute_plan(plan, executor=FakeExecutor(failing_forward_profile="00000000"))
+
+    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    assert "00000000" not in inventory["p_exec"]
+    assert {
+        tuple(sorted(item.items()))
+        for item in inventory["excluded_profiles"]
+    } == {
+        (("profile_id", "00000000"), ("reason_code", "FORWARD_NON_FINITE")),
+    }
+    failed_outcomes = [
+        json.loads(line)
+        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["variant_id"] == "00000000"
+    ]
+    assert len(failed_outcomes) == 2
+    assert all(row["forward_status"] == "invalid" for row in failed_outcomes)
 
 
 def test_plan_rejects_unavailable_defaults_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:

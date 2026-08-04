@@ -22,6 +22,7 @@ MATH_FINAL_COUNT = 500
 MATH_SOURCE_FILE_COUNT = 12_500
 MATH_SOURCE_TREE_ARTIFACT_ID = "d6d24801c6380e8f325c6fa7b226807a81c8f3bcc5f753f31c7adf7d523860ba"
 EXPECTED_PROFILES = ("BF16", "00000000", "11111111", "01010101")
+ANALYTICAL_PROFILE_IDS = tuple(f"{profile_id:08b}" for profile_id in range(256))
 EXPECTED_SOFTWARE = {
     "python": "3.12.3",
     "pytorch": "2.4.0+cu124",
@@ -69,6 +70,14 @@ EXPECTED_DETERMINISM = {
     "deterministic_algorithms": True,
     "cublas_workspace_config": ":4096:8",
 }
+COST_DIMENSIONS = (
+    "resident_accelerator_bytes",
+    "host_to_device_bytes",
+    "latency",
+    "prefetch_stall_time",
+    "kernel_switch_count",
+    "controller_probe_feedback_overhead",
+)
 
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -280,6 +289,8 @@ class ExperimentPlan:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> ExperimentPlan:
         raw = dict(value)
+        if raw.get("mode") == "estimate-cost":
+            return cls._from_cost_estimate_mapping(raw)
         _require_exact_keys(
             raw,
             {
@@ -307,8 +318,8 @@ class ExperimentPlan:
             raise ValueError("artifact_root must be an explicit non-empty path")
         if not isinstance(raw["attempt_id"], str) or not raw["attempt_id"]:
             raise ValueError("attempt_id must be explicit and non-empty")
-        if raw["mode"] != "smoke":
-            raise ValueError("issue #25 supports only explicit smoke mode")
+        if raw["mode"] not in {"smoke", "functional-quality"}:
+            raise ValueError("mode must be smoke or functional-quality")
         model = _require_mapping(raw["model"], "model")
         _require_exact_keys(model, {"identifier", "revision", "architecture", "layers", "dtype"}, "model")
         if model != {"identifier": MODEL_IDENTIFIER, "revision": MODEL_REVISION, "architecture": "LlamaForCausalLM", "layers": 32, "dtype": "bfloat16"}:
@@ -329,8 +340,47 @@ class ExperimentPlan:
         source_manifest = _require_mapping(raw["source_manifest"], "source_manifest")
         _validate_source_manifest(source_manifest)
         _validate_queries(raw["queries"], source_manifest)
-        if raw["profiles"] != list(EXPECTED_PROFILES):
-            raise ValueError("smoke profiles must be BF16, all-4, all-8, and mixed 01010101 in order")
+        expected_profiles = (
+            list(EXPECTED_PROFILES)
+            if raw["mode"] == "smoke"
+            else list(ANALYTICAL_PROFILE_IDS)
+        )
+        if raw["profiles"] != expected_profiles:
+            raise ValueError("profiles must match the declared mode's canonical profile scope")
+        return cls(copy.deepcopy(raw))
+
+    @classmethod
+    def _from_cost_estimate_mapping(cls, raw: dict[str, Any]) -> ExperimentPlan:
+        _require_exact_keys(
+            raw,
+            {
+                "schema_version",
+                "artifact_root",
+                "attempt_id",
+                "mode",
+                "source_manifest",
+                "queries",
+                "profiles",
+            },
+            "cost estimate experiment plan",
+        )
+        if raw["schema_version"] != "qbitplan.stage1.experiment-plan.v1":
+            raise ValueError("cost estimate plan has an unsupported schema_version")
+        if not isinstance(raw["artifact_root"], str) or not raw["artifact_root"]:
+            raise ValueError("artifact_root must be an explicit non-empty path")
+        if not isinstance(raw["attempt_id"], str) or not raw["attempt_id"]:
+            raise ValueError("attempt_id must be explicit and non-empty")
+        source_manifest = _require_mapping(raw["source_manifest"], "source_manifest")
+        _validate_source_manifest(source_manifest)
+        _validate_queries(raw["queries"], source_manifest)
+        profiles = raw["profiles"]
+        if not isinstance(profiles, list) or not profiles or len(profiles) != len(set(profiles)):
+            raise ValueError("cost estimate profiles must be a non-empty unique string array")
+        for profile in profiles:
+            if profile == "BF16":
+                continue
+            if not isinstance(profile, str) or len(profile) != 8 or set(profile) - {"0", "1"}:
+                raise ValueError(f"cost estimate profile is not a canonical eight-bit ID: {profile!r}")
         return cls(copy.deepcopy(raw))
 
     @property

@@ -1,4 +1,9 @@
-"""The real TorchAO-backed profile executor for issue #25 smoke runs."""
+"""Real pinned-model TorchAO profile executor.
+
+The optional ML libraries are imported only when this real adapter is used.
+The adapter owns the target-module mapping, profile transformation, complete
+forward, and ordered group-boundary observation.
+"""
 
 from __future__ import annotations
 

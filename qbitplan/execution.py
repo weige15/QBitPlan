@@ -1,15 +1,13 @@
-"""The single Stage-1 smoke ExperimentPlan-to-ArtifactBundle seam."""
+"""The single Stage-1 ExperimentPlan-to-ArtifactBundle seam."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import os
+import subprocess
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
-import json
-import os
 from pathlib import Path
-import subprocess
 from typing import Any, Protocol
 
 from .identity import canonical_json_bytes, sha256_bytes, sha256_canonical
@@ -22,10 +20,10 @@ class ProfileExecutor(Protocol):
     evidence_class: str
 
     def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
-        """Transform and execute one query under one declared smoke variant."""
+        ...
 
     def hardware_identity(self) -> Mapping[str, Any]:
-        """Return the observed hardware identity for the run."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -73,7 +71,7 @@ def _canonical_json_file(value: Mapping[str, Any]) -> bytes:
     return canonical_json_bytes(value) + b"\n"
 
 
-def _canonical_ndjson(records: list[Mapping[str, Any]]) -> bytes:
+def _canonical_ndjson(records: Sequence[Mapping[str, Any]]) -> bytes:
     return b"".join(canonical_json_bytes(record) + b"\n" for record in records)
 
 
@@ -134,6 +132,13 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
 
 def _configuration_hash(plan: ExperimentPlan) -> str:
     data = plan.to_mapping()
+    if data["mode"] == "estimate-cost":
+        return sha256_canonical({
+            "mode": data["mode"],
+            "source_manifest": data["source_manifest"],
+            "queries": data["queries"],
+            "profiles": data["profiles"],
+        })
     return sha256_canonical(
         {
             "model": data["model"],
@@ -160,12 +165,13 @@ def _lineage(
     record_count: int,
     created_at: str,
     evidence_class: str,
+    additional_source_artifact_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "artifact_type": artifact_type,
         "schema_version": schema_version,
         "producer_git_sha": producer_git_sha,
-        "source_artifact_ids": [source_artifact_id],
+        "source_artifact_ids": [source_artifact_id, *(additional_source_artifact_ids or [])],
         "source_manifest_id": source_manifest_id,
         "configuration_hash": configuration_hash,
         "record_count": record_count,
@@ -178,12 +184,92 @@ def _profile_bits(variant_id: str) -> str:
     return "BF16" if variant_id == "BF16" else variant_id
 
 
+def _build_profile_inventory(
+    *,
+    profile_ids: list[str],
+    outcomes: Sequence[Mapping[str, Any]],
+    source_manifest_id: str,
+    source_artifact_id: str,
+    producer_git_sha: str,
+    configuration_hash: str,
+    created_at: str,
+    outcome_evidence_classes: set[str],
+) -> dict[str, Any]:
+    """Summarize profile-level executable status without replacing outcomes."""
+
+    records_by_profile: dict[str, list[Mapping[str, Any]]] = {
+        profile_id: [] for profile_id in profile_ids
+    }
+    for outcome in outcomes:
+        records_by_profile[outcome["variant_id"]].append(outcome)
+
+    p_exec: list[str] = []
+    excluded_profiles: list[dict[str, str]] = []
+    for profile_id in profile_ids:
+        records = records_by_profile[profile_id]
+        transform_failures = sorted(
+            {
+                str(outcome["transform_reason_code"] or outcome["reason_code"])
+                for outcome in records
+                if outcome["transform_status"] == "invalid"
+            }
+        )
+        if transform_failures:
+            excluded_profiles.append(
+                {"profile_id": profile_id, "reason_code": transform_failures[0]}
+            )
+            continue
+        if any(
+            outcome["status"] == "complete"
+            and outcome["forward_status"] == "complete"
+            and outcome["transform_status"] in {"complete", "not_applicable"}
+            for outcome in records
+        ):
+            p_exec.append(profile_id)
+            continue
+        forward_failures = sorted(
+            {
+                str(outcome["forward_reason_code"] or outcome["reason_code"])
+                for outcome in records
+                if outcome["forward_status"] == "invalid"
+            }
+        )
+        excluded_profiles.append(
+            {
+                "profile_id": profile_id,
+                "reason_code": forward_failures[0] if forward_failures else "NO_COMPLETE_FORWARD",
+            }
+        )
+
+    return {
+        **_lineage(
+            artifact_type="profile-execution-inventory",
+            schema_version="qbitplan.stage1.profile-inventory.v1",
+            producer_git_sha=producer_git_sha,
+            source_manifest_id=source_manifest_id,
+            source_artifact_id=source_artifact_id,
+            configuration_hash=configuration_hash,
+            record_count=len(profile_ids),
+            created_at=created_at,
+            evidence_class="analytical",
+        ),
+        "profile_ids": profile_ids,
+        "p_exec": p_exec,
+        "excluded_profiles": excluded_profiles,
+        "enumeration_evidence_class": "analytical",
+        "outcome_evidence_classes": sorted(outcome_evidence_classes),
+        "outcome_file": "profile-outcomes.ndjson",
+        "outcome_record_count": len(outcomes),
+        "claim_scope": "executable profile feasibility only",
+    }
+
+
 def execute_plan(
     plan: ExperimentPlan | Mapping[str, Any],
     *,
     executor: ProfileExecutor | None = None,
 ) -> ArtifactBundle:
-    """Execute one validated smoke plan into one immutable artifact bundle.
+    """Execute one validated Stage-1 plan into one immutable artifact bundle.
 
     ``executor`` is intentionally a Python seam for deterministic contract
     tests. The CLI never exposes a selector for it and always constructs the
@@ -191,6 +277,12 @@ def execute_plan(
     """
 
     experiment_plan = plan if isinstance(plan, ExperimentPlan) else ExperimentPlan.from_mapping(plan)
+    if experiment_plan.data["mode"] == "estimate-cost":
+        if executor is None:
+            raise ValueError("estimate-cost mode requires an explicit lookup adapter")
+        from .stage1.lookup_execution import execute_lookup_plan
+
+        return execute_lookup_plan(experiment_plan, executor)
     if executor is None:
         from .stage1.executor import TorchAOProfileExecutor
 
@@ -219,7 +311,7 @@ def execute_plan(
 
     created_at = _now()
     evidence_class = getattr(executor, "evidence_class", "simulated")
-    if evidence_class not in {"simulated", "directly measured"}:
+    if evidence_class not in {"simulated", "lookup-table estimated", "directly measured"}:
         raise ValueError(f"unsupported executor evidence class: {evidence_class!r}")
     try:
         hardware_identity = dict(executor.hardware_identity())
@@ -292,6 +384,19 @@ def execute_plan(
                     }
                 )
 
+    profile_inventory = None
+    if experiment_plan.data["mode"] == "functional-quality":
+        profile_inventory = _build_profile_inventory(
+            profile_ids=list(experiment_plan.data["profiles"]),
+            outcomes=outcomes,
+            source_manifest_id=experiment_plan.source_manifest_id,
+            source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
+            producer_git_sha=producer_git_sha,
+            configuration_hash=configuration_hash,
+            created_at=created_at,
+            outcome_evidence_classes={str(row["evidence_class"]) for row in outcomes},
+        )
+
     plan_payload = experiment_plan.to_mapping()
     run_manifest = {
         **_lineage(
@@ -321,6 +426,8 @@ def execute_plan(
         "profile-outcomes.ndjson": _canonical_ndjson(outcomes),
         "group-boundaries.ndjson": _canonical_ndjson(boundaries),
     }
+    if profile_inventory is not None:
+        file_contents["profile-inventory.json"] = _canonical_json_file(profile_inventory)
     file_hashes: dict[str, str] = {}
     for filename, content in file_contents.items():
         file_hashes[filename] = _write_once(bundle_path / filename, content)
@@ -334,6 +441,13 @@ def execute_plan(
         "file_hashes": file_hashes,
         "indexed_files": list(file_hashes),
     }
+    is_smoke = experiment_plan.data["mode"] == "smoke"
+    bundle_claim_scope = "executable-path smoke only" if is_smoke else "executable profile feasibility inventory only"
+    cost_boundary = (
+        "omitted/unavailable/smoke-mode-no-cost-adapter"
+        if is_smoke
+        else "omitted/unavailable/no-cost-adapter"
+    )
     bundle_payload = {
         **_lineage(
             artifact_type="artifact-bundle",
@@ -349,8 +463,8 @@ def execute_plan(
         "bundle_id": sha256_canonical(bundle_identity),
         "run_id": run_id,
         "plan_id": plan_id,
-        "claim_scope": "executable-path smoke only",
-        "non_evidentiary": True,
+        "claim_scope": bundle_claim_scope,
+        "non_evidentiary": is_smoke,
         "files": [*file_contents, "bundle.json"],
         "artifact_index_file": "artifact-index.json",
         "file_hashes": file_hashes,
@@ -359,7 +473,7 @@ def execute_plan(
         "hardware_identity": hardware_identity,
         "evidence_boundary": {
             "quality": "omitted",
-            "cost": "omitted/unavailable/smoke-mode-no-cost-adapter",
+            "cost": cost_boundary,
             "systems_benefit": "omitted",
             "generalization": "omitted",
         },

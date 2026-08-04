@@ -12,3 +12,7 @@ __all__ = [
     "TorchAOProfileExecutor",
     "execute_plan",
 ]
+from .lookup import LookupCostEstimateAdapter
+
+__all__ = ["LookupCostEstimateAdapter", "TorchAOProfileExecutor"]
+
