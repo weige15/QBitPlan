@@ -298,6 +298,14 @@ def test_functional_quality_inventory_attempts_all_canonical_profiles(
     expected_profiles = [f"{profile_id:08b}" for profile_id in range(256)]
     assert inventory["profile_ids"] == expected_profiles
     assert inventory["p_exec"] == expected_profiles
+    assert inventory["profile_statuses"] == [
+        {
+            "profile_id": profile_id,
+            "executable": True,
+            "exclusion_reason_code": None,
+        }
+        for profile_id in expected_profiles
+    ]
     assert inventory["enumeration_evidence_class"] == "analytical"
     assert inventory["outcome_evidence_classes"] == ["simulated"]
     assert inventory["source_manifest_id"] == _source_manifest()["manifest_id"]
@@ -339,6 +347,11 @@ def test_functional_quality_inventory_excludes_only_failed_profile(
             "reason_code": "TRANSFORM_UNSUPPORTED",
         }
     ]
+    assert inventory["profile_statuses"][0] == {
+        "profile_id": "00000000",
+        "executable": False,
+        "exclusion_reason_code": "TRANSFORM_UNSUPPORTED",
+    }
 
 
 def test_functional_quality_inventory_excludes_forward_failure_without_substitute(

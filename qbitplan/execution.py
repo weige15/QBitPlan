@@ -6,7 +6,7 @@ import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -37,7 +37,7 @@ class ArtifactBundle:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _producer_git_sha() -> str:
@@ -110,14 +110,14 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("executor observation requires a non-empty reason code")
     prefix = observation["observed_group_prefix"]
     if not isinstance(prefix, list):
-        raise ValueError("executor observation group prefix must be a list")
+        raise TypeError("executor observation group prefix must be a list")
     for group in prefix:
         if not isinstance(group, Mapping):
-            raise ValueError("executor group prefix entries must be objects")
+            raise TypeError("executor group prefix entries must be objects")
         if set(group) != {"group_index", "prefix_bits"}:
             raise ValueError("executor group prefix entries have unspecified fields")
         if not isinstance(group["group_index"], int) or not isinstance(group["prefix_bits"], str):
-            raise ValueError("executor group prefix entries have invalid types")
+            raise TypeError("executor group prefix entries have invalid types")
     if observation["status"] == "complete":
         if observation["transform_status"] not in {"complete", "not_applicable"}:
             raise ValueError("complete observation has an incomplete transform")
@@ -205,6 +205,7 @@ def _build_profile_inventory(
 
     p_exec: list[str] = []
     excluded_profiles: list[dict[str, str]] = []
+    profile_statuses: list[dict[str, Any]] = []
     for profile_id in profile_ids:
         records = records_by_profile[profile_id]
         transform_failures = sorted(
@@ -215,8 +216,12 @@ def _build_profile_inventory(
             }
         )
         if transform_failures:
+            reason = transform_failures[0]
             excluded_profiles.append(
-                {"profile_id": profile_id, "reason_code": transform_failures[0]}
+                {"profile_id": profile_id, "reason_code": reason}
+            )
+            profile_statuses.append(
+                {"profile_id": profile_id, "executable": False, "exclusion_reason_code": reason}
             )
             continue
         if any(
@@ -226,6 +231,9 @@ def _build_profile_inventory(
             for outcome in records
         ):
             p_exec.append(profile_id)
+            profile_statuses.append(
+                {"profile_id": profile_id, "executable": True, "exclusion_reason_code": None}
+            )
             continue
         forward_failures = sorted(
             {
@@ -234,11 +242,15 @@ def _build_profile_inventory(
                 if outcome["forward_status"] == "invalid"
             }
         )
+        reason = forward_failures[0] if forward_failures else "NO_COMPLETE_FORWARD"
         excluded_profiles.append(
             {
                 "profile_id": profile_id,
-                "reason_code": forward_failures[0] if forward_failures else "NO_COMPLETE_FORWARD",
+                "reason_code": reason,
             }
+        )
+        profile_statuses.append(
+            {"profile_id": profile_id, "executable": False, "exclusion_reason_code": reason}
         )
 
     return {
@@ -255,6 +267,7 @@ def _build_profile_inventory(
         ),
         "profile_ids": profile_ids,
         "p_exec": p_exec,
+        "profile_statuses": profile_statuses,
         "excluded_profiles": excluded_profiles,
         "enumeration_evidence_class": "analytical",
         "outcome_evidence_classes": sorted(outcome_evidence_classes),
