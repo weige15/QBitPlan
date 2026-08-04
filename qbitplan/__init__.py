@@ -1,5 +1,3 @@
-"""Public QBitPlan execution seam."""
+"""QBitPlan public package."""
 
-from .execution import ArtifactBundle, execute_plan
-
-__all__ = ["ArtifactBundle", "execute_plan"]
+__all__ = ["stage1"]

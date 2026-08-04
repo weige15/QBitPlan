@@ -1,14 +1,13 @@
-"""Scientific CLI entry point for the issue-25 real smoke path."""
+"""Scientific CLI for the issue #25 smoke execution path."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
-from typing import Any
 
-from .execution import execute_plan
+from .stage1 import ExperimentPlan, execute_plan
+from .stage1.executor import RuntimeDependencyError, TorchAOProfileExecutor
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -17,27 +16,42 @@ def _parser() -> argparse.ArgumentParser:
     stage1 = commands.add_parser("stage1")
     stage1_commands = stage1.add_subparsers(dest="stage1_command", required=True)
     run = stage1_commands.add_parser("run")
-    run.add_argument("--plan", type=Path, required=True)
-    run.add_argument("--mode", choices=("smoke",), required=True)
+    run.add_argument("--plan", required=True)
+    run.add_argument("--mode", required=True, choices=("smoke",))
     run.add_argument("--gpu-uuid", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command != "stage1" or args.stage1_command != "run":
+        raise AssertionError("unreachable command parser state")
     try:
-        with args.plan.open("r", encoding="utf-8") as handle:
-            plan: dict[str, Any] = json.load(handle)
-        if not isinstance(plan, dict):
-            raise ValueError("experiment plan must be a JSON object")
-        if plan.get("mode") != args.mode:
-            raise ValueError("CLI mode does not match the explicit plan mode")
-        if "gpu_uuid" in plan and plan["gpu_uuid"] != args.gpu_uuid:
-            raise ValueError("CLI GPU UUID does not match the explicit plan GPU UUID")
-        plan["gpu_uuid"] = args.gpu_uuid
-        bundle = execute_plan(plan)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"qbitplan: rejected: {exc}", file=sys.stderr)
+        plan = ExperimentPlan.from_json_file(args.plan)
+        if plan.mode != args.mode:
+            raise ValueError("CLI mode does not match the plan mode")
+        if plan.data["hardware"]["gpu_uuid"] != args.gpu_uuid:
+            raise ValueError("CLI GPU UUID does not match the plan GPU UUID")
+        executor = TorchAOProfileExecutor(plan)
+        bundle = execute_plan(plan, executor)
+    except (FileExistsError, OSError, RuntimeDependencyError, ValueError, RuntimeError) as exc:
+        print(f"qbitplan: run rejected: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"bundle_path": str(bundle.path), "bundle_id": bundle.bundle_id, "run_id": bundle.run_id}))
+
+    print(
+        json.dumps(
+            {
+                "artifact_id": bundle.artifact_id,
+                "artifact_root": str(bundle.root),
+                "manifest_id": bundle.manifest_id,
+                "run_id": bundle.run_id,
+                "claim_boundary": bundle.payload["claim_boundary"],
+            },
+            sort_keys=True,
+        )
+    )
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

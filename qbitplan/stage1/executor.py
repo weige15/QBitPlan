@@ -1,149 +1,98 @@
-"""Real pinned-model TorchAO smoke executor.
-
-The optional ML libraries are imported only when this real adapter is used.
-The adapter owns the target-module mapping, profile transformation, complete
-forward, and ordered group-boundary observation.
-"""
+"""The real TorchAO-backed profile executor for issue #25 smoke runs."""
 
 from __future__ import annotations
 
-import csv
-import gc
+from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
-import io
 import os
 import random
 import subprocess
 import sys
-from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
-from ..identity import canonical_json_bytes
-from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
+from .contract import ExperimentPlan, ProfileExecutionResult
 
 
-class _ExecutionFailure(RuntimeError):
-    def __init__(self, reason_code: str, *, transform: bool = False) -> None:
-        super().__init__(reason_code)
-        self.reason_code = reason_code
-        self.transform = transform
+class RuntimeDependencyError(RuntimeError):
+    """Raised when the declared executable profile cannot be initialized."""
+
+
+def pin_gpu_uuid(expected_uuid: str) -> tuple[str, str, str]:
+    """Pin this process to exactly the declared physical GPU UUID."""
+
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=uuid,name,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeDependencyError("nvidia-smi is required to validate the GPU UUID") from exc
+
+    matches = []
+    for line in completed.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) == 3 and fields[0] == expected_uuid:
+            matches.append(fields)
+    if len(matches) != 1:
+        raise RuntimeDependencyError(f"declared GPU UUID is not uniquely available: {expected_uuid}")
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and visible != expected_uuid:
+        raise RuntimeDependencyError(
+            "CUDA_VISIBLE_DEVICES conflicts with the plan's UUID-pinned GPU"
+        )
+    os.environ["CUDA_VISIBLE_DEVICES"] = expected_uuid
+    return tuple(matches[0])  # type: ignore[return-value]
+
+
+@dataclass
+class _PreparedProfile:
+    model: Any | None
+    reason_code: str | None = None
+    detail: str = ""
 
 
 class TorchAOProfileExecutor:
-    """Execute the four issue-25 smoke variants on the pinned RTX 3090."""
+    """Own profile transforms and complete ordered model execution.
+
+    The class imports the accepted runtime stack lazily so contract tests can
+    run without importing or selecting a test adapter in the scientific CLI.
+    """
 
     evidence_class = "directly measured"
 
     def __init__(self, plan: ExperimentPlan) -> None:
         self.plan = plan
-        self._device_info: dict[str, Any] | None = None
-        self._tokenizer: Any | None = None
-        self._active_variant: str | None = None
-        self._active_model: Any | None = None
-        self._profile_failures: dict[str, _ExecutionFailure] = {}
+        pin_gpu_uuid(plan.data["hardware"]["gpu_uuid"])
+        self._torch, self._tokenizer, self._auto_model = self._load_runtime()
+        self._device = self._torch.device("cuda:0")
+        self._configure_runtime()
+        self._prepared: dict[str, _PreparedProfile] = {}
 
-    def hardware_identity(self) -> Mapping[str, Any]:
-        return dict(self._resolve_device())
-
-    def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
-        try:
-            model = self._model_for_variant(variant_id)
-            tokenizer = self._load_tokenizer()
-            return self._run_forward(model, tokenizer, query["prompt"], variant_id)
-        except _ExecutionFailure as exc:
-            if exc.transform:
-                return {
-                    "status": "invalid",
-                    "transform_status": "invalid",
-                    "forward_status": "not_attempted",
-                    "reason_code": exc.reason_code,
-                    "transform_reason_code": exc.reason_code,
-                    "forward_reason_code": "TRANSFORM_FAILED",
-                    "observed_group_prefix": [],
-                }
-            return {
-                "status": "invalid",
-                "transform_status": "complete" if variant_id != "BF16" else "not_applicable",
-                "forward_status": "invalid",
-                "reason_code": exc.reason_code,
-                "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
-                "forward_reason_code": exc.reason_code,
-                "observed_group_prefix": [],
-            }
-        except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
-            return {
-                "status": "invalid",
-                "transform_status": "complete" if variant_id != "BF16" else "not_applicable",
-                "forward_status": "invalid",
-                "reason_code": f"FORWARD_EXCEPTION:{type(exc).__name__}",
-                "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
-                "forward_reason_code": f"FORWARD_EXCEPTION:{type(exc).__name__}",
-                "observed_group_prefix": [],
-            }
-
-    def _resolve_device(self) -> dict[str, Any]:
-        if self._device_info is not None:
-            return self._device_info
-        gpu_uuid = self.plan.data["gpu_uuid"]
-        try:
-            result = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=index,name,uuid,driver_version",
-                    "--format=csv,noheader",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise _ExecutionFailure(f"GPU_QUERY_FAILED:{type(exc).__name__}") from exc
-        rows = list(csv.reader(io.StringIO(result.stdout), skipinitialspace=True))
-        selected: dict[str, Any] | None = None
-        for row in rows:
-            if len(row) != 4:
-                continue
-            index, name, uuid, driver = (item.strip() for item in row)
-            if uuid == gpu_uuid:
-                selected = {
-                    "device_index": int(index),
-                    "gpu_name": name,
-                    "gpu_uuid": uuid,
-                    "driver_version": driver,
-                }
-                break
-        if selected is None:
-            raise _ExecutionFailure("GPU_UUID_NOT_FOUND")
-        if selected["gpu_name"] != "NVIDIA GeForce RTX 3090":
-            raise _ExecutionFailure("GPU_MODEL_MISMATCH")
-        try:
-            import torch
-
-            self._validate_software(torch, selected["driver_version"])
-            if not torch.cuda.is_available():
-                raise _ExecutionFailure("CUDA_UNAVAILABLE")
-            if selected["device_index"] >= torch.cuda.device_count():
-                raise _ExecutionFailure("GPU_DEVICE_INDEX_UNAVAILABLE")
-            torch.cuda.set_device(selected["device_index"])
-            self._apply_determinism(torch)
-        except ImportError as exc:
-            raise _ExecutionFailure("PYTORCH_UNAVAILABLE") from exc
-        self._device_info = selected
-        return selected
-
-    def _validate_software(self, torch: Any, driver_version: str) -> None:
+    def _load_runtime(self) -> tuple[Any, Any, Any]:
         try:
             import accelerate
             import datasets
             import numpy as np
             import safetensors
-            import torchao
+            import torch
             import transformers
+            import torchao
+            from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
-            raise _ExecutionFailure("SOFTWARE_TUPLE_UNAVAILABLE") from exc
-        actual = {
-            "python": sys.version.split()[0],
+            raise RuntimeDependencyError(
+                "the declared Python/Torch/TorchAO/Transformers stack is unavailable"
+            ) from exc
+
+        expected = self.plan.data["backend"]
+        versions = {
             "pytorch": torch.__version__,
             "transformers": transformers.__version__,
             "torchao": torchao.__version__,
@@ -151,310 +100,374 @@ class TorchAOProfileExecutor:
             "datasets": datasets.__version__,
             "accelerate": accelerate.__version__,
             "safetensors": safetensors.__version__,
-            "cuda": torch.version.cuda,
-            "nvidia_driver": driver_version,
+            "python": sys.version.split()[0],
         }
-        if actual != self.plan.data["software"]:
-            raise _ExecutionFailure("SOFTWARE_TUPLE_MISMATCH")
+        for key, actual in versions.items():
+            expected_key = {"pytorch": "pytorch", "transformers": "transformers", "torchao": "version"}.get(
+                key, key
+            )
+            declared = expected.get(expected_key)
+            if key == "torchao":
+                declared = expected["version"]
+            if declared != actual:
+                raise RuntimeDependencyError(
+                    f"{key} version mismatch: plan={declared!r}, runtime={actual!r}"
+                )
+        if not torch.cuda.is_available():
+            raise RuntimeDependencyError("CUDA is unavailable for the real TorchAO executor")
 
-
-    def _apply_determinism(self, torch: Any) -> None:
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = self.plan.data["determinism"]["cublas_workspace_config"]
-        try:
-            import numpy as np
-
-            np.random.seed(self.plan.data["seed"])
-        except ImportError as exc:
-            raise _ExecutionFailure("NUMPY_UNAVAILABLE") from exc
-        random.seed(self.plan.data["seed"])
-        torch.manual_seed(self.plan.data["seed"])
-        torch.cuda.manual_seed_all(self.plan.data["seed"])
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
-        torch.set_float32_matmul_precision("highest")
-        try:
-            torch.use_deterministic_algorithms(True)
-        except RuntimeError as exc:
-            raise _ExecutionFailure("UNSUPPORTED_DETERMINISTIC_OPERATION") from exc
-
-    def _load_tokenizer(self) -> Any:
-        if self._tokenizer is not None:
-            return self._tokenizer
-        try:
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            raise _ExecutionFailure("TRANSFORMERS_UNAVAILABLE") from exc
+        identity = pin_gpu_uuid(self.plan.data["hardware"]["gpu_uuid"])
+        declared_hardware = self.plan.data["hardware"]
+        if identity[1] != declared_hardware["gpu_name"] or identity[2] != declared_hardware["driver"]:
+            raise RuntimeDependencyError("GPU name or driver does not match the plan")
+        if torch.version.cuda != self.plan.data["backend"]["cuda"]:
+            raise RuntimeDependencyError("CUDA runtime does not match the plan")
+        model_config = self.plan.data["model"]
         tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_IDENTIFIER,
-            revision=MODEL_REVISION,
+            model_config["id"],
+            revision=model_config["revision"],
             use_fast=True,
             trust_remote_code=False,
         )
         if not getattr(tokenizer, "is_fast", False):
-            raise _ExecutionFailure("FAST_TOKENIZER_UNAVAILABLE")
-        if tokenizer.eos_token_id is None:
-            raise _ExecutionFailure("EOS_TOKEN_ID_UNAVAILABLE")
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-        self._tokenizer = tokenizer
-        return tokenizer
+            raise RuntimeDependencyError("the accepted fast tokenizer is unavailable")
+        try:
+            from huggingface_hub import hf_hub_download
 
-    def _model_for_variant(self, variant_id: str) -> Any:
-        if variant_id not in self.plan.data["profiles"]:
-            raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
-        if variant_id in self._profile_failures:
-            raise self._profile_failures[variant_id]
-        if self._active_variant == variant_id and self._active_model is not None:
-            return self._active_model
-        self._release_model()
+            for filename, expected_hash in self.plan.data["tokenizer"]["file_hashes"].items():
+                tokenizer_path = hf_hub_download(
+                    repo_id=model_config["id"],
+                    filename=filename,
+                    revision=model_config["revision"],
+                )
+                with open(tokenizer_path, "rb") as handle:
+                    actual_hash = hashlib.sha256(handle.read()).hexdigest()
+                if actual_hash != expected_hash:
+                    raise RuntimeDependencyError(f"tokenizer file hash mismatch: {filename}")
+        except Exception as exc:
+            raise RuntimeDependencyError("tokenizer file hashes could not be verified") from exc
+        return torch, tokenizer, AutoModelForCausalLM
+
+    def _configure_runtime(self) -> None:
+        torch = self._torch
+        runtime = self.plan.data["runtime"]
+        workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+        if workspace is not None and workspace != runtime["cublas_workspace_config"]:
+            raise RuntimeDependencyError("CUBLAS_WORKSPACE_CONFIG conflicts with the plan")
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = runtime["cublas_workspace_config"]
+        random.seed(self.plan.data["seeds"]["python"])
+        torch.manual_seed(self.plan.data["seeds"]["torch_cpu"])
+        import numpy as np
+
+        np.random.seed(self.plan.data["seeds"]["numpy"])
+        torch.cuda.manual_seed_all(self.plan.data["seeds"]["torch_cuda"])
+        torch.set_float32_matmul_precision(runtime["float32_matmul_precision"])
+        torch.backends.cuda.matmul.allow_tf32 = runtime["tf32"]
+        torch.backends.cudnn.benchmark = runtime["cudnn_benchmark"]
+        torch.backends.cudnn.deterministic = runtime["deterministic_cudnn"]
+        torch.use_deterministic_algorithms(runtime["deterministic_algorithms"])
+
+    def execute(self, profile_id: str, query: dict[str, str]) -> ProfileExecutionResult:
+        prepared = self._prepare_profile(profile_id)
+        boundaries = tuple(f"g{index}[{index * 4}:{(index + 1) * 4}]" for index in range(8))
+        if prepared.model is None:
+            return ProfileExecutionResult(
+                profile_id=profile_id,
+                query_id=query["query_id"],
+                transform_status="not_applicable" if profile_id == "bf16" else "failed",
+                forward_status="not_run",
+                terminal_status="invalid",
+                executable=False,
+                reason_code=prepared.reason_code or "transform_failed",
+                evidence_class=self.evidence_class,
+                detail=prepared.detail,
+                group_boundaries=boundaries,
+                upstream_state="not_available",
+            )
+        return self._forward(profile_id, query, prepared.model, boundaries)
+
+    def _prepare_profile(self, profile_id: str) -> _PreparedProfile:
+        if profile_id in self._prepared:
+            return self._prepared[profile_id]
         try:
-            import torch
-            from transformers import AutoModelForCausalLM
-        except ImportError as exc:
-            failure = _ExecutionFailure("MODEL_RUNTIME_UNAVAILABLE")
-            self._profile_failures[variant_id] = failure
-            raise failure from exc
-        device_info = self._resolve_device()
-        device = torch.device("cuda", device_info["device_index"])
-        try:
-            model = cast(Any, AutoModelForCausalLM.from_pretrained(
-                MODEL_IDENTIFIER,
-                revision=MODEL_REVISION,
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=False,
-            ))
-            model.eval()
-            if variant_id != "BF16":
-                self._transform_profile(model, variant_id)
-            self._validate_group_structure(model)
-            model.to(device)
-            if variant_id != "BF16":
-                self._validate_quantized_representation(model, variant_id, device)
-        except _ExecutionFailure as exc:
-            self._profile_failures[variant_id] = exc
-            self._release_model()
-            raise
-        except RuntimeError as exc:
-            reason = "OOM" if "out of memory" in str(exc).lower() else "TRANSFORM_OR_LOAD_RUNTIME_ERROR"
-            failure = _ExecutionFailure(reason, transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
-            raise failure from exc
-        except OSError as exc:
-            failure = _ExecutionFailure("MODEL_LOAD_FAILED", transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
-            raise failure from exc
-        self._active_variant = variant_id
-        self._active_model = model
+            model = self._load_model()
+            if profile_id != "bf16":
+                self._apply_profile(model, profile_id)
+            prepared = _PreparedProfile(model=model)
+        except (RuntimeError, ValueError, OSError, AssertionError, AttributeError, TypeError, ImportError, KeyError, IndexError, MemoryError) as exc:
+            prepared = _PreparedProfile(
+                model=None,
+                reason_code=self._transform_reason(exc),
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        self._prepared[profile_id] = prepared
+        return prepared
+
+    def _load_model(self) -> Any:
+        model_config = self.plan.data["model"]
+        model = self._auto_model.from_pretrained(
+            model_config["id"],
+            revision=model_config["revision"],
+            torch_dtype=self._torch.bfloat16,
+            trust_remote_code=False,
+        )
+        model = model.to(self._device)
+        if getattr(model.config, "model_type", None) != "llama":
+            raise RuntimeError("loaded model architecture is not Llama")
+        layers = getattr(getattr(model, "model", None), "layers", None)
+        if layers is None or len(layers) != self.plan.data["model"]["layers"]:
+            raise RuntimeError("loaded model layer count does not match the plan")
+        first_parameter = next(model.parameters(), None)
+        if first_parameter is None or first_parameter.dtype != self._torch.bfloat16:
+            raise RuntimeError("loaded model parameters are not BF16")
+        model.eval()
         return model
 
-    @staticmethod
-    def _validate_quantized_representation(model: Any, variant_id: str, device: Any) -> None:
-        try:
-            from torchao.dtypes.affine_quantized_tensor import AffineQuantizedTensor
-        except ImportError as exc:
-            raise _ExecutionFailure("TORCHAO_REPRESENTATION_UNAVAILABLE", transform=True) from exc
-        modules = dict(model.named_modules())
-        for group_index in range(8):
-            for fqn in TorchAOProfileExecutor._group_targets(group_index):
-                weight = getattr(modules[fqn], "weight", None)
-                if not isinstance(weight, AffineQuantizedTensor):
-                    raise _ExecutionFailure(
-                        f"TRANSFORM_REPRESENTATION_NOT_TORCHAO:{variant_id}", transform=True
-                    )
-                if weight.device != device:
-                    raise _ExecutionFailure("TRANSFORM_REPRESENTATION_DEVICE_MISMATCH", transform=True)
-
-
-    def _release_model(self) -> None:
-        if self._active_model is not None:
-            del self._active_model
-            gc.collect()
-        self._active_model = None
-        self._active_variant = None
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-
-    @staticmethod
-    def _group_targets(group_index: int) -> set[str]:
-        suffixes = (
-            "self_attn.q_proj",
-            "self_attn.k_proj",
-            "self_attn.v_proj",
-            "self_attn.o_proj",
-            "mlp.gate_proj",
-            "mlp.up_proj",
-            "mlp.down_proj",
-        )
-        return {
-            f"model.layers.{layer_index}.{suffix}"
-            for layer_index in range(group_index * 4, (group_index + 1) * 4)
-            for suffix in suffixes
-        }
-
-    def _transform_profile(self, model: Any, variant_id: str) -> None:
-        try:
-            from torchao.quantization import (
-                int4_weight_only,
-                int8_weight_only,
-                quantize_,
-            )
-        except ImportError as exc:
-            raise _ExecutionFailure("TORCHAO_UNAVAILABLE", transform=True) from exc
-        all_targets = {fqn for group_index in range(8) for fqn in self._group_targets(group_index)}
+    def _apply_profile(self, model: Any, profile_id: str) -> None:
+        bits = self._profile_bits(profile_id)
         named_modules = dict(model.named_modules())
-        missing = sorted(all_targets - set(named_modules))
-        if missing:
-            raise _ExecutionFailure("TRANSFORM_TARGET_MAPPING_INCOMPLETE", transform=True)
-        before_weight_ids: dict[str, int] = {}
-        for fqn in all_targets:
-            module = named_modules[fqn]
-            if not hasattr(module, "weight"):
-                raise _ExecutionFailure("TRANSFORM_TARGET_WEIGHT_MISSING", transform=True)
-            before_weight_ids[fqn] = id(module.weight)
-        for group_index, bit in enumerate(variant_id):
-            targets = self._group_targets(group_index)
-            seen: set[str] = set()
-
-            def filter_fn(
-                module: Any,
-                fqn: str,
-                *,
-                target_set: set[str] = targets,
-                seen_set: set[str] = seen,
-            ) -> bool:
-                del module
-                if fqn in target_set:
-                    seen_set.add(fqn)
-                    return True
-                return False
-
-            config = int4_weight_only(group_size=128) if bit == "0" else int8_weight_only()
-            try:
-                quantize_(model, config, filter_fn=filter_fn, set_inductor_config=False)
-            except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
-                raise _ExecutionFailure(
-                    f"TRANSFORM_FAILED_GROUP_{group_index}:{type(exc).__name__}", transform=True
-                ) from exc
-            if seen != targets:
-                raise _ExecutionFailure(
-                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}", transform=True
-                )
-
-        after_modules = dict(model.named_modules())
-        unchanged = [
-            fqn for fqn, before_id in before_weight_ids.items()
-            if id(after_modules[fqn].weight) == before_id
-        ]
-        if unchanged:
-            raise _ExecutionFailure("TRANSFORM_REPRESENTATION_UNCHANGED", transform=True)
-        non_target_before = {
-            name: id(module.weight)
-            for name, module in named_modules.items()
-            if hasattr(module, "weight") and name not in all_targets
+        all_target_fqns = {
+            fqn for group_index in range(8) for fqn in self._group_fqns(group_index)
         }
+        missing = sorted(fqn for fqn in all_target_fqns if fqn not in named_modules)
+        if missing:
+            raise RuntimeError(f"unsupported_transform: missing target modules {missing[:3]}")
+        before_weight_ids = {
+            fqn: id(module.weight)
+            for fqn, module in named_modules.items()
+            if hasattr(module, "weight")
+        }
+        missing_weights = sorted(
+            fqn for fqn in all_target_fqns if fqn not in before_weight_ids
+        )
+        if missing_weights:
+            raise RuntimeError(
+                f"unsupported_transform: target modules lack weights {missing_weights[:3]}"
+            )
+        for group_index, bit in enumerate(bits):
+            fqns = self._group_fqns(group_index)
+            missing = sorted(fqn for fqn in fqns if fqn not in named_modules)
+            if missing:
+                raise RuntimeError(f"unsupported_transform: missing target modules {missing[:3]}")
+            target_fqns = set(fqns)
+            if bit == 4:
+                from torchao.quantization import int4_weight_only
+
+                config = int4_weight_only(group_size=self.plan.data["groups"]["int4_group_size"])
+            else:
+                from torchao.quantization import int8_weight_only
+
+                config = int8_weight_only()
+
+            def filter_fn(module: Any, fqn: str, targets: set[str] = target_fqns) -> bool:
+                return fqn in targets
+
+            from torchao.quantization import quantize_
+
+            quantize_(model, config, filter_fn=filter_fn, device=self._device)
+        after_modules = dict(model.named_modules())
+        untransformed = [
+            fqn for fqn in all_target_fqns if id(after_modules[fqn].weight) == before_weight_ids[fqn]
+        ]
+        if untransformed:
+            raise RuntimeError(f"unsupported_transform: target weights did not transform {untransformed[:3]}")
         changed_non_targets = [
-            fqn for fqn, before_id in non_target_before.items()
-            if fqn in after_modules
-            and hasattr(after_modules[fqn], "weight")
-            and id(after_modules[fqn].weight) != before_id
+            fqn for fqn, before_id in before_weight_ids.items()
+            if fqn not in all_target_fqns and id(after_modules[fqn].weight) != before_id
         ]
         if changed_non_targets:
-            raise _ExecutionFailure("TRANSFORM_NON_TARGET_CHANGED", transform=True)
+            raise RuntimeError(f"unsupported_transform: non-target weights changed {changed_non_targets[:3]}")
 
-    @staticmethod
-    def _validate_group_structure(model: Any) -> None:
-        layers = getattr(getattr(model, "model", None), "layers", None)
-        if layers is None or len(layers) != 32:
-            raise _ExecutionFailure("GROUP_STRUCTURE_UNSUPPORTED", transform=True)
-        names = dict(model.named_modules())
-        for group_index in range(8):
-            targets = TorchAOProfileExecutor._group_targets(group_index)
-            if not targets.issubset(names):
-                raise _ExecutionFailure(
-                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}", transform=True
-                )
+    def _profile_bits(self, profile_id: str) -> tuple[int, ...]:
+        if profile_id not in self.plan.profile_ids or profile_id == "bf16":
+            raise RuntimeError(f"unsupported_transform: unknown profile {profile_id}")
+        if len(profile_id) != 8 or any(bit not in "01" for bit in profile_id):
+            raise RuntimeError(f"unsupported_transform: invalid profile {profile_id}")
+        return tuple(4 if bit == "0" else 8 for bit in profile_id)
 
-    def _run_forward(self, model: Any, tokenizer: Any, prompt: str, variant_id: str) -> Mapping[str, Any]:
-        try:
-            import torch
-        except ImportError as exc:
-            raise _ExecutionFailure("PYTORCH_UNAVAILABLE") from exc
-        device_info = self._resolve_device()
-        device = torch.device("cuda", device_info["device_index"])
-        encoded = tokenizer(
-            prompt,
-            add_special_tokens=True,
-            padding=False,
-            truncation=False,
-            return_tensors="pt",
-        )
-        input_length = int(encoded["input_ids"].shape[-1])
-        max_positions = getattr(model.config, "max_position_embeddings", None)
-        if max_positions is not None and input_length + self.plan.data["decoder"]["max_new_tokens"] > max_positions:
-            raise _ExecutionFailure("PROMPT_GENERATION_OVERFLOW")
-        encoded = {key: value.to(device) for key, value in encoded.items()}
-        prefix: list[dict[str, Any]] = []
-        observed_groups: set[int] = set()
+    def _group_fqns(self, group_index: int) -> tuple[str, ...]:
+        projections = self.plan.data["groups"]["target_projections"]
+        names = []
+        for layer in range(group_index * 4, group_index * 4 + 4):
+            names.extend(
+                [
+                    f"model.layers.{layer}.self_attn.{projection}"
+                    for projection in projections[:4]
+                ]
+            )
+            names.extend(
+                [
+                    f"model.layers.{layer}.mlp.{projection}"
+                    for projection in projections[4:]
+                ]
+            )
+        return tuple(names)
+
+    @contextmanager
+    def _ordered_group_observer(self, model: Any) -> Any:
+        observed_groups: list[int] = []
+        named_modules = dict(model.named_modules())
         handles = []
-        layers = model.model.layers
-        for group_index in range(8):
-            layer = layers[(group_index + 1) * 4 - 1]
-
-            def hook(module: Any, inputs: Any, output: Any, *, index: int = group_index) -> None:
-                del module, inputs, output
-                if index not in observed_groups:
-                    observed_groups.add(index)
-                    prefix.append({"group_index": index, "prefix_bits": "BF16" if variant_id == "BF16" else variant_id[: index + 1]})
-
-            handles.append(layer.register_forward_hook(hook))
-        try:
-            with torch.inference_mode():
-                outputs = model(**encoded, use_cache=True, return_dict=True)
-                if not bool(torch.isfinite(outputs.logits).all().item()):
-                    raise _ExecutionFailure("NON_FINITE_OUTPUT")
-                generated = model.generate(
-                    **encoded,
-                    max_new_tokens=1024,
-                    num_beams=4,
-                    num_return_sequences=1,
-                    do_sample=False,
-                    early_stopping=True,
-                    length_penalty=1.0,
-                    repetition_penalty=1.0,
-                    no_repeat_ngram_size=0,
-                    num_beam_groups=1,
-                    diversity_penalty=0.0,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
+        for group_index in range(self.plan.data["groups"]["count"]):
+            first_group_fqn = self._group_fqns(group_index)[0]
+            try:
+                module = named_modules[first_group_fqn]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"incomplete_group_order: missing boundary module {first_group_fqn}"
+                ) from exc
+            handles.append(
+                module.register_forward_pre_hook(
+                    lambda _module, _inputs, group=group_index: observed_groups.append(group)
                 )
-        except _ExecutionFailure:
-            raise
-        except RuntimeError as exc:
-            reason = "OOM" if "out of memory" in str(exc).lower() else f"FORWARD_RUNTIME_ERROR:{type(exc).__name__}"
-            raise _ExecutionFailure(reason) from exc
+            )
+        try:
+            yield observed_groups
         finally:
             for handle in handles:
                 handle.remove()
-        if [entry["group_index"] for entry in prefix] != list(range(8)):
-            raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER")
-        token_values = generated[0].detach().cpu().tolist()
-        return {
-            "status": "complete",
-            "transform_status": "not_applicable" if variant_id == "BF16" else "complete",
-            "forward_status": "complete",
-            "reason_code": None,
-            "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
-            "forward_reason_code": None,
-            "observed_group_prefix": prefix,
-            "token_count": len(token_values),
-            "output_hash": hashlib.sha256(canonical_json_bytes(token_values)).hexdigest(),
-        }
+
+    def _forward(
+        self,
+        profile_id: str,
+        query: dict[str, str],
+        model: Any,
+        boundaries: tuple[str, ...],
+    ) -> ProfileExecutionResult:
+        try:
+            tokenizer = self._tokenizer
+            eos_token_id = tokenizer.eos_token_id
+            if eos_token_id is None:
+                raise RuntimeError("missing eos token ID")
+            encoded = tokenizer(
+                query["prompt"],
+                return_tensors="pt",
+                add_special_tokens=True,
+                padding=False,
+                truncation=False,
+            )
+            input_ids = encoded["input_ids"]
+            max_positions = getattr(model.config, "max_position_embeddings", None)
+            max_new_tokens = self.plan.data["decoder"]["max_new_tokens"]
+            if max_positions is not None and input_ids.shape[-1] + max_new_tokens > max_positions:
+                return self._failed_forward(
+                    profile_id,
+                    query["query_id"],
+                    "context_overflow",
+                    "prompt plus generation exceeds the model context window",
+                    boundaries,
+                )
+            encoded = {key: value.to(self._device) for key, value in encoded.items()}
+            decoder = self.plan.data["decoder"]
+            with self._ordered_group_observer(model) as observed_groups:
+                self._torch.cuda.synchronize()
+                with self._torch.inference_mode():
+                    generated = model.generate(
+                        **encoded,
+                        max_new_tokens=decoder["max_new_tokens"],
+                        num_beams=decoder["num_beams"],
+                        num_return_sequences=decoder["num_return_sequences"],
+                        do_sample=decoder["do_sample"],
+                        early_stopping=decoder["early_stopping"],
+                        length_penalty=decoder["length_penalty"],
+                        repetition_penalty=decoder["repetition_penalty"],
+                        no_repeat_ngram_size=decoder["no_repeat_ngram_size"],
+                        num_beam_groups=decoder["num_beam_groups"],
+                        diversity_penalty=decoder["diversity_penalty"],
+                        pad_token_id=eos_token_id,
+                        eos_token_id=eos_token_id,
+                        use_cache=self.plan.data["runtime"]["use_cache"],
+                        output_scores=True,
+                        return_dict_in_generate=True,
+                    )
+                self._torch.cuda.synchronize()
+            if tuple(observed_groups[:8]) != tuple(range(8)):
+                return self._failed_forward(
+                    profile_id,
+                    query["query_id"],
+                    "incomplete_group_order",
+                    "group execution did not observe the ordered eight-group path",
+                    boundaries,
+                )
+            for score in getattr(generated, "scores", ()) or ():
+                if not bool(self._torch.isfinite(score).all()):
+                    return self._failed_forward(
+                        profile_id,
+                        query["query_id"],
+                        "non_finite_output",
+                        "generation score contained a non-finite value",
+                        boundaries,
+                    )
+            sequences = generated.sequences.detach().cpu().numpy().tobytes()
+            return ProfileExecutionResult(
+                profile_id=profile_id,
+                query_id=query["query_id"],
+                transform_status="not_applicable" if profile_id == "bf16" else "complete",
+                forward_status="complete",
+                terminal_status="complete",
+                executable=True,
+                reason_code="completed",
+                evidence_class=self.evidence_class,
+                output_digest=hashlib.sha256(sequences).hexdigest(),
+                group_boundaries=boundaries,
+                upstream_state=f"ordered-groups:{','.join(str(group) for group in observed_groups[:8])}",
+            )
+        except (RuntimeError, ValueError, OSError, AssertionError, AttributeError, TypeError, ImportError, KeyError, IndexError, MemoryError) as exc:
+            return self._failed_forward(
+                profile_id,
+                query["query_id"],
+                self._forward_reason(exc),
+                f"{type(exc).__name__}: {exc}",
+                boundaries,
+            )
+
+    def _failed_forward(
+        self,
+        profile_id: str,
+        query_id: str,
+        reason_code: str,
+        detail: str,
+        boundaries: tuple[str, ...],
+    ) -> ProfileExecutionResult:
+        return ProfileExecutionResult(
+            profile_id=profile_id,
+            query_id=query_id,
+            transform_status="not_applicable" if profile_id == "bf16" else "complete",
+            forward_status="failed",
+            terminal_status="invalid",
+            executable=False,
+            reason_code=reason_code,
+            evidence_class=self.evidence_class,
+            detail=detail,
+            group_boundaries=boundaries,
+            upstream_state="not_available",
+        )
+
+    @staticmethod
+    def _forward_reason(exc: Exception) -> str:
+        message = str(exc).lower()
+        if "group_order" in message or "group execution" in message:
+            return "incomplete_group_order"
+        if "deterministic" in message:
+            return "unsupported_determinism"
+        if "overflow" in message:
+            return "context_overflow"
+        if "non-finite" in message or "nonfinite" in message:
+            return "non_finite_output"
+        if "out of memory" in message or "cuda out of memory" in message:
+            return "oom"
+        if isinstance(exc, MemoryError):
+            return "oom"
+        return "forward_failed"
+
+    @staticmethod
+    def _transform_reason(exc: Exception) -> str:
+        if "out of memory" in str(exc).lower():
+            return "oom"
+        if isinstance(exc, MemoryError):
+            return "oom"
+        if "deterministic" in str(exc).lower():
+            return "unsupported_determinism"
+        if "unsupported_transform" in str(exc) or "unsupported" in str(exc).lower():
+            return "unsupported_transform"
+        return "transform_failed"
