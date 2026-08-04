@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from pathlib import Path
 import zipfile
-
+from pathlib import Path
 
 NAME = "qbitplan"
 VERSION = "0.1.0"
@@ -73,8 +72,8 @@ def _build(wheel_directory: str, editable: bool) -> str:
     if editable:
         files["qbitplan_editable.pth"] = (str(source_root) + "\n").encode("utf-8")
     else:
-        for path in (source_root / "qbitplan").rglob("*.py"):
-            files[path.relative_to(source_root).as_posix()] = path.read_bytes()
+        for source_path in (source_root / "qbitplan").rglob("*.py"):
+            files[source_path.relative_to(source_root).as_posix()] = source_path.read_bytes()
     files[f"{DIST_INFO}/METADATA"] = _metadata().encode("utf-8")
     files[f"{DIST_INFO}/WHEEL"] = _wheel_metadata().encode("utf-8")
     files[f"{DIST_INFO}/entry_points.txt"] = _entry_points().encode("utf-8")

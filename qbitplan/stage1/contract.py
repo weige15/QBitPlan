@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
-
+from typing import Any
 
 EVIDENCE_CLASSES = frozenset(
     {
@@ -72,7 +72,7 @@ def _require(mapping: Mapping[str, Any], key: str) -> Any:
 def _require_mapping(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = _require(mapping, key)
     if not isinstance(value, Mapping):
-        raise ValueError(f"plan field {key} must be an object")
+        raise ValueError(f"plan field {key} must be an object")  # noqa: TRY004
     return value
 
 
@@ -99,10 +99,10 @@ class ExperimentPlan:
     data: Mapping[str, Any]
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "ExperimentPlan":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> ExperimentPlan:
         data = _copy_json(raw)
         if not isinstance(data, dict):
-            raise ValueError("experiment plan must be a JSON object")
+            raise ValueError("experiment plan must be a JSON object")  # noqa: TRY004
 
         _require_exact(data, "mode", "smoke")
         _require(data, "artifact_root")
@@ -246,7 +246,7 @@ class ExperimentPlan:
         phases = set()
         for query in queries:
             if not isinstance(query, dict):
-                raise ValueError("each smoke query must be an object")
+                raise ValueError("each smoke query must be an object")  # noqa: TRY004
             for key in (
                 "query_id",
                 "source_id",
@@ -268,7 +268,7 @@ class ExperimentPlan:
                 raise ValueError("smoke queries require a source artifact ID")
             record = query["record"]
             if not isinstance(record, dict):
-                raise ValueError("each smoke query record must be an object")
+                raise ValueError("each smoke query record must be an object")  # noqa: TRY004
             for key in ("problem", "solution", "level", "type"):
                 _require(record, key)
             if any(not isinstance(record[key], str) for key in ("problem", "solution", "level", "type")):
@@ -302,7 +302,7 @@ class ExperimentPlan:
         return cls(data=data)
 
     @classmethod
-    def from_json_file(cls, path: str | Path) -> "ExperimentPlan":
+    def from_json_file(cls, path: str | Path) -> ExperimentPlan:
         with Path(path).open("r", encoding="utf-8") as handle:
             return cls.from_mapping(json.load(handle))
 

@@ -82,7 +82,7 @@ COST_DIMENSIONS = (
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{label} must be an object")
+        raise ValueError(f"{label} must be an object")  # noqa: TRY004
     return value
 
 
@@ -269,7 +269,7 @@ def _validate_queries(value: Any, source_manifest: Mapping[str, Any]) -> None:
             raise ValueError(f"queries[{index}] must be explicitly permitted")
         record = _require_mapping(query_map["record"], f"queries[{index}].record")
         if not isinstance(record.get("problem"), str):
-            raise ValueError(f"queries[{index}].record.problem must be a string")
+            raise ValueError(f"queries[{index}].record.problem must be a string")  # noqa: TRY004
         if query_map["record_hash"] != sha256_canonical(record):
             raise ValueError(f"queries[{index}] record hash does not match its record")
         if query_map["record_hash"] != source_manifest["record_hashes"][phase][source_id]:
