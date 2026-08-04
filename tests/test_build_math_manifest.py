@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from scripts.build_math_manifest import canonical_json_bytes, main
+from qbitplan.plan import ExperimentPlan
 
 
 def _write_source_record(root: Path, source_id: str, problem: str) -> None:
@@ -73,6 +74,12 @@ def test_build_command_writes_separated_manifest_and_smoke_plan(tmp_path: Path) 
                 str(manifest_path),
                 "--smoke-plan-output",
                 str(smoke_path),
+                "--artifact-root",
+                str(tmp_path / "artifacts"),
+                "--attempt-id",
+                "attempt-0001",
+                "--gpu-uuid",
+                "test-gpu-uuid",
             ]
         )
         == 0
@@ -93,7 +100,8 @@ def test_build_command_writes_separated_manifest_and_smoke_plan(tmp_path: Path) 
     assert manifest["record_hashes"]["training"]["train/algebra/0.json"] == expected_train_hash
 
     smoke_plan = json.loads(smoke_path.read_text(encoding="utf-8"))
-    assert smoke_plan["manifest_artifact_id"] == manifest["artifact_id"]
+    ExperimentPlan.from_mapping(smoke_plan)
+    assert smoke_plan["source_manifest"]["artifact_id"] == manifest["artifact_id"]
     assert {query["phase"] for query in smoke_plan["queries"]} == {"training", "validation"}
     assert all(query["source_artifact_id"] == manifest["artifact_id"] for query in smoke_plan["queries"])
     assert all(query["permitted"] is True for query in smoke_plan["queries"])
@@ -111,6 +119,12 @@ def test_build_command_rejects_missing_raw_source_tree(tmp_path: Path, capsys) -
             str(tmp_path / "manifest.json"),
             "--smoke-plan-output",
             str(tmp_path / "smoke-plan.json"),
+            "--artifact-root",
+            str(tmp_path / "artifacts"),
+            "--attempt-id",
+            "attempt-0001",
+            "--gpu-uuid",
+            "test-gpu-uuid",
         ]
     )
 

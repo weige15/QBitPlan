@@ -25,7 +25,10 @@ python3 scripts/build_math_manifest.py \
   --source-root /path/to/MATH \
   --math500-root data/pinned/math-500 \
   --manifest-output data/manifests/math-source.json \
-  --smoke-plan-output data/manifests/math-smoke-plan.json
+  --smoke-plan-output data/manifests/math-smoke-plan.json \
+  --artifact-root /path/to/artifacts \
+  --attempt-id attempt-0001 \
+  --gpu-uuid GPU-UUID
 ```
 
 The command fails closed unless it finds exactly 7,500 training records and

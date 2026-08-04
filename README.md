@@ -5,9 +5,9 @@ Query-conditioned causal bit planning for budgeted LLM inference.
 ## What this project is
 
 QBitPlan is a research project about selecting executable mixed-precision
-profiles for model inference. The repository is currently a documentation
-and research-definition workspace; this initialization does not include an
-implementation or experiment runner.
+profiles for model inference. The first runtime slice is the explicit Stage-1
+ExperimentPlan-to-ArtifactBundle smoke seam; it is executable-path evidence
+only and does not establish quality or systems claims.
 
 ## Start here
 
@@ -35,7 +35,9 @@ guides under [docs/agents](docs/agents/).
 
 ## Current state
 
-The proposed v0.1 boundary and its unresolved choices are recorded in
-[ADR-0001](docs/adr/0001-v0.1-research-boundary.md). There is no runtime
-quickstart yet; implementation work depends on acceptance of the relevant
-research contract.
+The accepted Stage-1 contract and its execution seam are implemented for issue
+#25. Build an explicit smoke plan with
+[the data-preparation command](docs/data-preparation.md), then run
+`qbitplan stage1 run --plan <smoke-plan> --mode smoke --gpu-uuid <uuid>`.
+Smoke output is immutable and non-evidentiary; see the issue and execution
+contract for the required data and hardware boundary.

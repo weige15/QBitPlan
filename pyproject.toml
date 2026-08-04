@@ -1,0 +1,17 @@
+[build-system]
+requires = []
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "qbitplan"
+version = "0.1.0"
+description = "Query-conditioned causal bit planning for budgeted LLM inference"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+qbitplan = "qbitplan.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["qbitplan*"]

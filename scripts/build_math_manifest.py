@@ -16,6 +16,9 @@ import json
 from pathlib import Path
 import sys
 from typing import Any
+from qbitplan.config import accepted_smoke_configuration
+from qbitplan.identity import canonical_json_bytes as canonical_artifact_json_bytes
+from qbitplan.plan import math_prompt
 
 
 DATASET = "MATH"
@@ -181,15 +184,6 @@ def _record_hashes(records: Mapping[str, Mapping[str, Any]], ids: Sequence[str])
     return {source_id: sha256_canonical(records[source_id]) for source_id in ids}
 
 
-def _math_prompt(record: Mapping[str, Any]) -> str:
-    return (
-        "Problem:\n"
-        + str(record["problem"])
-        + "\n\nSolve the problem. Show your reasoning and put the final answer in\n"
-        + r"\boxed{...}."
-        + "\nSolution:"
-    )
-
 
 def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     source_root = source_root.resolve()
@@ -275,7 +269,7 @@ def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, An
                 "dataset": DATASET,
                 "phase": phase,
                 "source_revision": SOURCE_REVISION,
-                "prompt": _math_prompt(record),
+                "prompt": math_prompt(record["problem"]),
                 "permitted": True,
             }
         )
@@ -295,7 +289,7 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> None:
         raise ManifestBuildError(f"refusing to overwrite immutable output: {path}")
     try:
         with path.open("xb") as handle:
-            handle.write(canonical_json_bytes(value) + b"\n")
+            handle.write(canonical_artifact_json_bytes(value) + b"\n")
     except FileExistsError as exc:
         raise ManifestBuildError(f"refusing to overwrite immutable output: {path}") from exc
     except OSError as exc:
@@ -315,11 +309,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--math500-root",
         type=Path,
-        default=Path("data/pinned/math-500"),
-        help="pinned MATH-500 checkout (default: data/pinned/math-500)",
+        required=True,
+        help="explicit pinned MATH-500 checkout containing test.jsonl",
     )
     parser.add_argument("--manifest-output", type=Path, required=True)
     parser.add_argument("--smoke-plan-output", type=Path, required=True)
+    parser.add_argument("--artifact-root", type=Path, required=True)
+    parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--gpu-uuid", required=True)
     return parser
 
 
@@ -332,6 +329,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.manifest_output.exists() or args.smoke_plan_output.exists():
             raise ManifestBuildError("refusing to overwrite an existing immutable output")
         _write_once(args.manifest_output, manifest)
+        smoke_plan = {
+            **accepted_smoke_configuration(
+                artifact_root=str(args.artifact_root),
+                attempt_id=args.attempt_id,
+                gpu_uuid=args.gpu_uuid,
+            ),
+            "source_manifest": smoke_plan["source_manifest"],
+            "queries": smoke_plan["queries"],
+        }
         _write_once(args.smoke_plan_output, smoke_plan)
     except (ManifestBuildError, OSError) as exc:
         print(f"build_math_manifest: rejected: {exc}", file=sys.stderr)
