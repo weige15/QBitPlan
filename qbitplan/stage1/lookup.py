@@ -17,7 +17,7 @@ LOOKUP_EVIDENCE_CLASS = "lookup-table estimated"
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        raise ValueError(f"{label} must be an object")
+        raise ValueError(f"{label} must be an object")  # noqa: TRY004
     return value
 
 
@@ -45,7 +45,7 @@ def _unique_strings(value: Any, label: str) -> list[str]:
 
 def _validate_cost(value: Any, label: str) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{label} must be a JSON number")
+        raise ValueError(f"{label} must be a JSON number")  # noqa: TRY004
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"{label} must be finite and non-negative")
     return value
@@ -74,7 +74,7 @@ class LookupCostEstimateAdapter:
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"unable to read declared lookup table: {path}") from exc
         if not isinstance(table, Mapping):
-            raise ValueError("declared lookup table must be a JSON object")
+            raise ValueError("declared lookup table must be a JSON object")  # noqa: TRY004
         return cls(table, lookup_artifact_id=sha256_bytes(raw_bytes))
 
     @classmethod
@@ -145,7 +145,7 @@ class LookupCostEstimateAdapter:
             raise ValueError("coverage_manifest.manifest_id does not match its canonical payload")
         entries = table["entries"]
         if not isinstance(entries, list):
-            raise ValueError("lookup table entries must be an array")
+            raise ValueError("lookup table entries must be an array")  # noqa: TRY004
         normalized_entries: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for index, raw_entry in enumerate(entries):

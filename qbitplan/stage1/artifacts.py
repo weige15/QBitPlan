@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import os
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .contract import ExperimentPlan, ProfileExecutionResult, canonical_json_bytes
 
@@ -41,7 +42,7 @@ class ArtifactBundle:
         cls,
         plan: ExperimentPlan,
         results: Iterable[ProfileExecutionResult],
-    ) -> "ArtifactBundle":
+    ) -> ArtifactBundle:
         rows = list(results)
         expected_count = len(plan.profile_ids) * len(plan.queries)
         if len(rows) != expected_count:
@@ -55,7 +56,7 @@ class ArtifactBundle:
         if actual_keys != expected_keys:
             raise ValueError("execution results do not account for every profile/query pair")
 
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = datetime.now(UTC).isoformat()
         execution_result_mappings = [row.to_mapping() for row in rows]
         execution_results_content = b"".join(
             canonical_json_bytes(row) + b"\n" for row in execution_result_mappings
@@ -169,7 +170,7 @@ class ArtifactBundle:
         )
 
     @classmethod
-    def load(cls, root: str | Path) -> "ArtifactBundle":
+    def load(cls, root: str | Path) -> ArtifactBundle:
         bundle_root = Path(root)
         index = _read_json(bundle_root / "artifact-index.json")
         bundle_path = bundle_root / index["bundle_file"]
@@ -197,5 +198,5 @@ def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
-        raise ValueError(f"artifact file is not a JSON object: {path}")
+        raise ValueError(f"artifact file is not a JSON object: {path}")  # noqa: TRY004
     return value

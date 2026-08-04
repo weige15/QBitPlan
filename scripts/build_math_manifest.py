@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build the pinned, non-final MATH manifest used by the Stage-1 smoke plan.
 
 The MATH Git repository contains loaders, not the 12,500 raw problem files.
@@ -10,13 +9,12 @@ Hugging Face caches or the combined Parquet cache used by earlier work.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
 import hashlib
 import json
-from pathlib import Path
 import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
-
 
 DATASET = "MATH"
 SOURCE_REVISION = "985bdc1696e88e8643f081a0ff4719da39f2ae2a"

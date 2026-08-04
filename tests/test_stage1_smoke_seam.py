@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -227,7 +227,7 @@ def test_transform_failure_is_recorded_and_never_substituted(tmp_path: Path) -> 
     assert all(row["terminal_status"] == "invalid" for row in failed)
     assert all(row["executable"] is False for row in failed)
     assert all(row["reason_code"] == "unsupported_transform" for row in failed)
-    assert set(row["profile_id"] for row in bundle.payload["execution_results"]) == {
+    assert {row["profile_id"] for row in bundle.payload["execution_results"]} == {
         "bf16",
         "00000000",
         "11111111",
