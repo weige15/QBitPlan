@@ -9,6 +9,7 @@ from .plan import (
     EXPECTED_DETERMINISM,
     EXPECTED_RUNTIME,
     EXPECTED_SOFTWARE,
+    TOKENIZER_FILE_HASHES,
 )
 
 
@@ -31,6 +32,7 @@ def accepted_smoke_configuration(
         },
         "tokenizer": {
             "identifier": "meta-llama/Llama-3.1-8B",
+            "file_hashes": dict(TOKENIZER_FILE_HASHES),
             "revision": "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b",
             "use_fast": True,
             "trust_remote_code": False,

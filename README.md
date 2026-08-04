@@ -68,6 +68,13 @@ The bundle also contains paired functional-quality outcome and diagnostic artifa
 for BF16 plus every executable profile. These records provide pinned external
 correctness, BF16-relative degradation, and separately labeled output diagnostics;
 they do not establish cost, latency, memory, systems benefit, or generalization.
+For the accepted final-only MMLU-Pro run, use `scripts/build_mmlu_manifest.py`
+and `scripts/build_mmlu_quality_plan.py` as documented in
+[the data-preparation guide](docs/data-preparation.md). The manifest pins Hub
+revision `b189ec765aa7ed75c8acfea42df31fdae71f97be`, all 12,032 test
+`question_id` records, and the source parquet hash. Final plans consume the
+frozen non-final MATH `P_exec` inventory and carry the execution-contract
+tokenizer file hashes.
 
 Issue #30 adds the fixed direct-cost smoke frame around the same real executor:
 

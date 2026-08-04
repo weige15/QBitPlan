@@ -6,7 +6,7 @@ import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -19,11 +19,11 @@ class ProfileExecutor(Protocol):
 
     evidence_class: str
 
-    def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
-        ...
+    def execute(
+        self, query: Mapping[str, Any], variant_id: str
+    ) -> Mapping[str, Any]: ...
 
-    def hardware_identity(self) -> Mapping[str, Any]:
-        ...
+    def hardware_identity(self) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class ArtifactBundle:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _producer_git_sha() -> str:
@@ -106,18 +106,23 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("executor observation has an unsupported transform status")
     if observation["forward_status"] not in {"complete", "invalid", "not_attempted"}:
         raise ValueError("executor observation has an unsupported forward status")
-    if observation["status"] in {"invalid", "incomplete", "aborted"} and (not isinstance(observation["reason_code"], str) or not observation["reason_code"]):
+    if observation["status"] in {"invalid", "incomplete", "aborted"} and (
+        not isinstance(observation["reason_code"], str)
+        or not observation["reason_code"]
+    ):
         raise ValueError("executor observation requires a non-empty reason code")
     prefix = observation["observed_group_prefix"]
     if not isinstance(prefix, list):
-        raise ValueError("executor observation group prefix must be a list")
+        raise ValueError("executor observation group prefix must be a list")  # noqa: TRY004
     for group in prefix:
         if not isinstance(group, Mapping):
-            raise ValueError("executor group prefix entries must be objects")
+            raise ValueError("executor group prefix entries must be objects")  # noqa: TRY004
         if set(group) != {"group_index", "prefix_bits"}:
             raise ValueError("executor group prefix entries have unspecified fields")
-        if not isinstance(group["group_index"], int) or not isinstance(group["prefix_bits"], str):
-            raise ValueError("executor group prefix entries have invalid types")
+        if not isinstance(group["group_index"], int) or not isinstance(
+            group["prefix_bits"], str
+        ):
+            raise ValueError("executor group prefix entries have invalid types")  # noqa: TRY004
     if observation["status"] == "complete":
         if observation["transform_status"] not in {"complete", "not_applicable"}:
             raise ValueError("complete observation has an incomplete transform")
@@ -125,7 +130,10 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("complete observation has an incomplete forward")
         if [entry["group_index"] for entry in prefix] != list(range(8)):
             raise ValueError("complete observation has an incomplete group order")
-    elif observation["status"] == "invalid" and observation["forward_status"] == "complete":
+    elif (
+        observation["status"] == "invalid"
+        and observation["forward_status"] == "complete"
+    ):
         raise ValueError("invalid observation has a complete forward")
     return dict(observation)
 
@@ -133,12 +141,14 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
 def _configuration_hash(plan: ExperimentPlan) -> str:
     data = plan.to_mapping()
     if data["mode"] == "estimate-cost":
-        return sha256_canonical({
-            "mode": data["mode"],
-            "source_manifest": data["source_manifest"],
-            "queries": data["queries"],
-            "profiles": data["profiles"],
-        })
+        return sha256_canonical(
+            {
+                "mode": data["mode"],
+                "source_manifest": data["source_manifest"],
+                "queries": data["queries"],
+                "profiles": data["profiles"],
+            }
+        )
     return sha256_canonical(
         {
             "model": data["model"],
@@ -171,7 +181,10 @@ def _lineage(
         "artifact_type": artifact_type,
         "schema_version": schema_version,
         "producer_git_sha": producer_git_sha,
-        "source_artifact_ids": [source_artifact_id, *(additional_source_artifact_ids or [])],
+        "source_artifact_ids": [
+            source_artifact_id,
+            *(additional_source_artifact_ids or []),
+        ],
         "source_manifest_id": source_manifest_id,
         "configuration_hash": configuration_hash,
         "record_count": record_count,
@@ -219,7 +232,7 @@ def _build_profile_inventory(
                 {"profile_id": profile_id, "reason_code": transform_failures[0]}
             )
             continue
-        if any(
+        if records and all(
             outcome["status"] == "complete"
             and outcome["forward_status"] == "complete"
             and outcome["transform_status"] in {"complete", "not_applicable"}
@@ -237,7 +250,9 @@ def _build_profile_inventory(
         excluded_profiles.append(
             {
                 "profile_id": profile_id,
-                "reason_code": forward_failures[0] if forward_failures else "NO_COMPLETE_FORWARD",
+                "reason_code": forward_failures[0]
+                if forward_failures
+                else "NO_COMPLETE_FORWARD",
             }
         )
 
@@ -276,12 +291,15 @@ def execute_plan(
     real :class:`TorchAOProfileExecutor`.
     """
 
-    experiment_plan = plan if isinstance(plan, ExperimentPlan) else ExperimentPlan.from_mapping(plan)
+    experiment_plan = (
+        plan if isinstance(plan, ExperimentPlan) else ExperimentPlan.from_mapping(plan)
+    )
     if experiment_plan.data["mode"] == "estimate-cost":
         if executor is None:
             raise ValueError("estimate-cost mode requires an explicit lookup adapter")
         from .stage1.lookup_execution import execute_lookup_plan
 
+        return execute_lookup_plan(experiment_plan, executor)
     if experiment_plan.data["mode"] == "direct-cost":
         from .stage1.direct_cost import DirectCostRunner, execute_direct_cost_plan
 
@@ -294,7 +312,6 @@ def execute_plan(
         if not isinstance(executor, DirectCostRunner):
             raise ValueError("direct-cost mode requires the DirectCostRunner adapter")
         return execute_direct_cost_plan(experiment_plan, executor)
-        return execute_lookup_plan(experiment_plan, executor)
     if executor is None:
         from .stage1.executor import TorchAOProfileExecutor
 
@@ -323,11 +340,24 @@ def execute_plan(
 
     created_at = _now()
     evidence_class = getattr(executor, "evidence_class", "simulated")
-    if evidence_class not in {"simulated", "lookup-table estimated", "directly measured"}:
+    if evidence_class not in {
+        "simulated",
+        "lookup-table estimated",
+        "directly measured",
+    }:
         raise ValueError(f"unsupported executor evidence class: {evidence_class!r}")
     try:
         hardware_identity = dict(executor.hardware_identity())
-    except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
+    except (
+        RuntimeError,
+        ValueError,
+        OSError,
+        TypeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+        MemoryError,
+    ) as exc:
         hardware_identity = {
             "gpu_uuid": experiment_plan.data["gpu_uuid"],
             "identity_status": "unavailable",
@@ -338,65 +368,188 @@ def execute_plan(
     boundaries: list[dict[str, Any]] = []
     observations_cache: dict[tuple[str, str], dict[str, Any]] = {}
     queries = experiment_plan.data["queries"]
-    for query in queries:
-        for variant_id in experiment_plan.data["profiles"]:
+    lineage_additional_source_artifact_ids = (
+        [experiment_plan.data["profile_inventory"]["artifact_id"]]
+        if experiment_plan.data["source_manifest"]["dataset"] == "MMLU-Pro"
+        else []
+    )
+
+    def _normalize_observation(value: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return _observation_fields(value)
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
+            return _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
+
+    def _append_observation(
+        query: Mapping[str, Any], variant_id: str, observation: Mapping[str, Any]
+    ) -> None:
+        normalized = dict(observation)
+        observations_cache[(query["query_id"], variant_id)] = normalized
+        outcome = {
+            **_lineage(
+                artifact_type="profile-outcome",
+                schema_version="qbitplan.stage1.profile-outcome.v1",
+                producer_git_sha=producer_git_sha,
+                source_manifest_id=experiment_plan.source_manifest_id,
+                source_artifact_id=experiment_plan.data["source_manifest"][
+                    "artifact_id"
+                ],
+                configuration_hash=configuration_hash,
+                record_count=1,
+                created_at=created_at,
+                evidence_class=evidence_class,
+                additional_source_artifact_ids=lineage_additional_source_artifact_ids,
+            ),
+            "phase": query["phase"],
+            "query_id": query["query_id"],
+            "variant_id": variant_id,
+            "profile_bits": _profile_bits(variant_id),
+            "status": normalized["status"],
+            "transform_status": normalized["transform_status"],
+            "terminal_status": normalized["status"],
+            "executable": normalized["status"] == "complete"
+            and normalized["forward_status"] == "complete"
+            and normalized["transform_status"] in {"complete", "not_applicable"},
+            "forward_status": normalized["forward_status"],
+            "reason_code": normalized["reason_code"],
+            "transform_reason_code": normalized["transform_reason_code"],
+            "forward_reason_code": normalized["forward_reason_code"],
+        }
+        for field in ("token_count", "output_hash"):
+            if field in normalized:
+                outcome[field] = normalized[field]
+        outcomes.append(outcome)
+        for boundary in normalized["observed_group_prefix"]:
+            boundaries.append(
+                {
+                    **_lineage(
+                        artifact_type="group-boundary",
+                        schema_version="qbitplan.stage1.group-boundary.v1",
+                        producer_git_sha=producer_git_sha,
+                        source_manifest_id=experiment_plan.source_manifest_id,
+                        source_artifact_id=experiment_plan.data["source_manifest"][
+                            "artifact_id"
+                        ],
+                        configuration_hash=configuration_hash,
+                        record_count=1,
+                        created_at=created_at,
+                        evidence_class=evidence_class,
+                        additional_source_artifact_ids=lineage_additional_source_artifact_ids,
+                    ),
+                    "phase": query["phase"],
+                    "query_id": query["query_id"],
+                    "variant_id": variant_id,
+                    "group_index": boundary["group_index"],
+                    "prefix_bits": boundary["prefix_bits"],
+                }
+            )
+
+    def _execute_variant(variant_id: str) -> None:
+        prepare = getattr(executor, "prepare_variant", None)
+        execute_prepared = getattr(executor, "execute_prepared", None)
+        release = getattr(executor, "release_variant", None)
+        if callable(prepare) and callable(execute_prepared) and callable(release):
+            release_error: Exception | None = None
             try:
-                observation = _observation_fields(executor.execute(query, variant_id))
-            except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
-                observation = _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
-            observations_cache[(query["query_id"], variant_id)] = observation
-            outcome = {
-                **_lineage(
-                    artifact_type="profile-outcome",
-                    schema_version="qbitplan.stage1.profile-outcome.v1",
-                    producer_git_sha=producer_git_sha,
-                    source_manifest_id=experiment_plan.source_manifest_id,
-                    source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
-                    configuration_hash=configuration_hash,
-                    record_count=1,
-                    created_at=created_at,
-                    evidence_class=evidence_class,
-                ),
-                "phase": query["phase"],
-                "query_id": query["query_id"],
-                "variant_id": variant_id,
-                "profile_bits": _profile_bits(variant_id),
-                "status": observation["status"],
-                "transform_status": observation["transform_status"],
-                "terminal_status": observation["status"],
-                "executable": observation["status"] == "complete"
-                and observation["forward_status"] == "complete"
-                and observation["transform_status"] in {"complete", "not_applicable"},
-                "forward_status": observation["forward_status"],
-                "reason_code": observation["reason_code"],
-                "transform_reason_code": observation["transform_reason_code"],
-                "forward_reason_code": observation["forward_reason_code"],
-            }
-            for field in ("token_count", "output_hash"):
-                if field in observation:
-                    outcome[field] = observation[field]
-            outcomes.append(outcome)
-            for boundary in observation["observed_group_prefix"]:
-                boundaries.append(
-                    {
-                        **_lineage(
-                            artifact_type="group-boundary",
-                            schema_version="qbitplan.stage1.group-boundary.v1",
-                            producer_git_sha=producer_git_sha,
-                            source_manifest_id=experiment_plan.source_manifest_id,
-                            source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
-                            configuration_hash=configuration_hash,
-                            record_count=1,
-                            created_at=created_at,
-                            evidence_class=evidence_class,
-                        ),
-                        "phase": query["phase"],
-                        "query_id": query["query_id"],
-                        "variant_id": variant_id,
-                        "group_index": boundary["group_index"],
-                        "prefix_bits": boundary["prefix_bits"],
-                    }
+                try:
+                    preparation = prepare(variant_id)
+                except (
+                    RuntimeError,
+                    ValueError,
+                    OSError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    AttributeError,
+                    MemoryError,
+                ) as exc:
+                    preparation = _invalid_observation(
+                        f"PREPARATION_EXCEPTION:{type(exc).__name__}"
+                    )
+                if not isinstance(preparation, Mapping):
+                    preparation = _invalid_observation("INVALID_PREPARATION_RECORD")
+                if preparation.get("status") != "complete":
+                    reason = preparation.get(
+                        "reason_code", "PROFILE_PREPARATION_FAILED"
+                    )
+                    for query in queries:
+                        _append_observation(
+                            query,
+                            variant_id,
+                            _invalid_observation(str(reason)),
+                        )
+                    return
+                for query in queries:
+                    try:
+                        observation = execute_prepared(query, variant_id)
+                    except (
+                        RuntimeError,
+                        ValueError,
+                        OSError,
+                        TypeError,
+                        KeyError,
+                        IndexError,
+                        AttributeError,
+                        MemoryError,
+                    ) as exc:
+                        observation = _invalid_observation(
+                            f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
+                        )
+                    if not isinstance(observation, Mapping):
+                        observation = _invalid_observation("INVALID_EXECUTOR_RECORD")
+                    _append_observation(
+                        query, variant_id, _normalize_observation(observation)
+                    )
+            finally:
+                try:
+                    release(variant_id)
+                except (
+                    RuntimeError,
+                    ValueError,
+                    OSError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    AttributeError,
+                    MemoryError,
+                ) as exc:
+                    release_error = exc
+            if release_error is not None:
+                raise RuntimeError(
+                    f"PROFILE_RELEASE_EXCEPTION:{type(release_error).__name__}"
+                ) from release_error
+            return
+        for query in queries:
+            try:
+                observation = executor.execute(query, variant_id)
+            except (
+                RuntimeError,
+                ValueError,
+                OSError,
+                TypeError,
+                KeyError,
+                IndexError,
+                AttributeError,
+                MemoryError,
+            ) as exc:
+                observation = _invalid_observation(
+                    f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
                 )
+            if not isinstance(observation, Mapping):
+                observation = _invalid_observation("INVALID_EXECUTOR_RECORD")
+            _append_observation(query, variant_id, _normalize_observation(observation))
+
+    for variant_id in experiment_plan.data["profiles"]:
+        _execute_variant(variant_id)
 
     quality_run = None
     quality_records: list[dict[str, Any]] = []
@@ -463,7 +616,10 @@ def execute_plan(
         }
 
     profile_inventory = None
-    if experiment_plan.data["mode"] == "functional-quality":
+    if (
+        experiment_plan.data["mode"] == "functional-quality"
+        and experiment_plan.data["source_manifest"]["dataset"] != "MMLU-Pro"
+    ):
         profile_inventory = _build_profile_inventory(
             profile_ids=list(experiment_plan.data["profiles"]),
             outcomes=outcomes,
@@ -487,6 +643,7 @@ def execute_plan(
             record_count=len(outcomes),
             created_at=created_at,
             evidence_class="analytical",
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "run_id": run_id,
         "plan_id": plan_id,
@@ -505,10 +662,14 @@ def execute_plan(
         "group-boundaries.ndjson": _canonical_ndjson(boundaries),
     }
     if profile_inventory is not None:
-        file_contents["profile-inventory.json"] = _canonical_json_file(profile_inventory)
+        file_contents["profile-inventory.json"] = _canonical_json_file(
+            profile_inventory
+        )
     if quality_run is not None and quality_summary is not None:
         file_contents["quality-outcomes.ndjson"] = _canonical_ndjson(quality_records)
-        file_contents["quality-diagnostics.ndjson"] = _canonical_ndjson(diagnostic_records)
+        file_contents["quality-diagnostics.ndjson"] = _canonical_ndjson(
+            diagnostic_records
+        )
         file_contents["quality-summary.json"] = _canonical_json_file(quality_summary)
     file_hashes: dict[str, str] = {}
     for filename, content in file_contents.items():
@@ -524,7 +685,19 @@ def execute_plan(
         "indexed_files": list(file_hashes),
     }
     is_smoke = experiment_plan.data["mode"] == "smoke"
-    bundle_claim_scope = "executable-path smoke only" if is_smoke else "executable profile feasibility inventory only"
+    is_mmlu_quality = (
+        experiment_plan.data["mode"] == "functional-quality"
+        and experiment_plan.data["source_manifest"]["dataset"] == "MMLU-Pro"
+    )
+    bundle_claim_scope = (
+        "executable-path smoke only"
+        if is_smoke
+        else (
+            "pinned functional-quality evidence"
+            if is_mmlu_quality
+            else "executable profile feasibility inventory only"
+        )
+    )
     cost_boundary = (
         "omitted/unavailable/smoke-mode-no-cost-adapter"
         if is_smoke
@@ -541,12 +714,17 @@ def execute_plan(
             record_count=len(outcomes),
             created_at=created_at,
             evidence_class=evidence_class,
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "bundle_id": sha256_canonical(bundle_identity),
         "run_id": run_id,
         "plan_id": plan_id,
         "claim_scope": bundle_claim_scope,
-        "quality_claim_scope": ("omitted" if is_smoke else "pinned functional-quality evidence: external correctness, BF16-relative degradation, and separately labeled output diagnostics"),
+        "quality_claim_scope": (
+            "omitted"
+            if is_smoke
+            else "pinned functional-quality evidence: external correctness, BF16-relative degradation, and separately labeled output diagnostics"
+        ),
         "non_evidentiary": is_smoke,
         "files": [*file_contents, "bundle.json"],
         "artifact_index_file": "artifact-index.json",
@@ -555,14 +733,20 @@ def execute_plan(
         "file_hash_scope": "payload files; artifact-index.json records bundle.json and payload hashes",
         "hardware_identity": hardware_identity,
         "evidence_boundary": {
-            "quality": ("omitted" if is_smoke else "external task correctness, BF16-relative degradation, and separately labeled output diagnostics"),
+            "quality": (
+                "omitted"
+                if is_smoke
+                else "external task correctness, BF16-relative degradation, and separately labeled output diagnostics"
+            ),
             "cost": cost_boundary,
             "systems_benefit": "omitted",
             "generalization": "omitted",
         },
     }
     bundle_content = _canonical_json_file(bundle_payload)
-    file_hashes["bundle.json"] = _write_once(bundle_path / "bundle.json", bundle_content)
+    file_hashes["bundle.json"] = _write_once(
+        bundle_path / "bundle.json", bundle_content
+    )
     index_payload = {
         **_lineage(
             artifact_type="artifact-index",
@@ -574,6 +758,7 @@ def execute_plan(
             record_count=len(file_hashes),
             created_at=created_at,
             evidence_class="analytical",
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "bundle_file": "bundle.json",
         "bundle_artifact_id": file_hashes["bundle.json"],

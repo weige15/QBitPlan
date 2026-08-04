@@ -8,7 +8,7 @@ from typing import Any
 
 import qbitplan.plan as plan_module
 from qbitplan import execute_plan
-from qbitplan.plan import canonical_json_bytes
+from qbitplan.plan import TOKENIZER_FILE_HASHES, canonical_json_bytes
 
 EXPECTED_SOFTWARE = {
     "python": "3.12.3",
@@ -123,6 +123,7 @@ def _plan(root: Path, *, attempt_id: str = "attempt-0001") -> dict[str, Any]:
         "tokenizer": {
             "identifier": "meta-llama/Llama-3.1-8B",
             "revision": "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b",
+            "file_hashes": dict(TOKENIZER_FILE_HASHES),
             "use_fast": True,
             "trust_remote_code": False,
         },

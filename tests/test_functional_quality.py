@@ -76,6 +76,25 @@ class FakeQualityExecutor:
         }
 
 
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("A", "A"),
+        ("A.", "A"),
+        ("A)", "A"),
+        ("Answer: A", "A"),
+        ("Final answer: J", "J"),
+        ("Answer:A", None),
+        ("Answer:\nA", None),
+    ],
+)
+def test_mmlu_answer_parser_uses_exact_accepted_forms(
+    text: str, expected: str | None
+) -> None:
+    assert FunctionalQualityRunner.parse_mmlu_answer(text) == expected
+
+
 def _quality_plan(root: Path, monkeypatch) -> Any:
     _patch_synthetic_manifest_constants(monkeypatch)
     raw = _plan(root)

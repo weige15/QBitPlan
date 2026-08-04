@@ -71,6 +71,49 @@ Those records provide external correctness and BF16-relative degradation only;
 they do not produce cost, latency, memory, systems-benefit, or generalization
 claims.
 
+## Final MMLU-Pro quality campaign
+
+The accepted final-only MMLU-Pro artifact is Hub revision
+`b189ec765aa7ed75c8acfea42df31fdae71f97be`, split `test`, with 12,032
+source-defined `question_id` records. Build its manifest from the exact pinned
+parquet; the command verifies the parquet SHA-256 and writes the manifest once:
+
+```bash
+python scripts/build_mmlu_manifest.py \
+  --download-dir /path/to/mmlu-cache \
+  --manifest-output data/manifests/mmlu-pro-test.json
+```
+
+The source-faithful option list is retained per question (the pinned source has
+some reviewed rows with fewer than ten options); options are never padded or
+fabricated. The final plan consumes the frozen non-final MATH `P_exec` inventory by immutable file hash; it embeds the canonical prompts and records, and pins
+the tokenizer file hashes declared by the execution contract:
+
+```bash
+python scripts/build_mmlu_quality_plan.py \
+  --source-parquet /path/to/mmlu-cache/data/test-00000-of-00001.parquet \
+  --manifest data/manifests/mmlu-pro-test.json \
+  --profile-inventory /path/to/profile-inventory.json \
+  --artifact-root /path/to/artifacts \
+  --attempt-id mmlu-pro-final-quality-0001 \
+  --gpu-uuid GPU-UUID \
+  --output /path/to/mmlu-pro-final-quality-plan.json
+```
+
+Run the full paired quality campaign on one UUID-pinned RTX 3090:
+
+```bash
+qbitplan stage1 run \
+  --plan /path/to/mmlu-pro-final-quality-plan.json \
+  --mode functional-quality \
+  --gpu-uuid GPU-UUID
+```
+
+MMLU-Pro is final-only cross-dataset evidence. Its outcomes are reported
+separately from non-final MATH calibration and validation; the bundle claims
+quality and diagnostics only, not cost or systems benefit.
+
+
 ## Direct-cost smoke frame
 
 Issue #30 uses a validated plan declaring `mode` as `direct-cost` and the same

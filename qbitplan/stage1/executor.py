@@ -17,10 +17,16 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 from ..identity import canonical_json_bytes
-from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
+from ..plan import (
+    MODEL_IDENTIFIER,
+    MODEL_REVISION,
+    TOKENIZER_FILE_HASHES,
+    ExperimentPlan,
+)
 
 
 class _ExecutionFailure(RuntimeError):
@@ -302,6 +308,7 @@ class TorchAOProfileExecutor:
             use_fast=True,
             trust_remote_code=False,
         )
+        self._verify_tokenizer_files()
         if not getattr(tokenizer, "is_fast", False):
             raise _ExecutionFailure("FAST_TOKENIZER_UNAVAILABLE")
         if tokenizer.eos_token_id is None:
@@ -310,14 +317,34 @@ class TorchAOProfileExecutor:
         self._tokenizer = tokenizer
         return tokenizer
 
+    def _verify_tokenizer_files(self) -> None:
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+        try:
+            snapshot_root = snapshot_download(
+                MODEL_IDENTIFIER,
+                revision=MODEL_REVISION,
+                allow_patterns=list(TOKENIZER_FILE_HASHES),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+        for filename, expected in TOKENIZER_FILE_HASHES.items():
+            path = os.path.join(snapshot_root, filename)
+            try:
+                actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            except OSError as exc:
+                raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+            if actual != expected:
+                raise _ExecutionFailure("TOKENIZER_FILE_HASH_MISMATCH")
+
     def _model_for_variant(self, variant_id: str) -> Any:
         if variant_id != "BF16" and variant_id not in self.plan.data["profiles"]:
             raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
         if variant_id in self._profile_failures:
             reason_code, transform, phase = self._profile_failures[variant_id]
-            raise _ExecutionFailure(
-                reason_code, transform=transform, phase=phase
-            )
+            raise _ExecutionFailure(reason_code, transform=transform, phase=phase)
         if self._active_variant == variant_id and self._active_model is not None:
             return self._active_model
         self._release_model()
@@ -365,27 +392,21 @@ class TorchAOProfileExecutor:
                 try:
                     self._transform_profile(model, variant_id)
                 finally:
-                    details["quantization_ns"] = (
-                        time.perf_counter_ns() - stage_started
-                    )
+                    details["quantization_ns"] = time.perf_counter_ns() - stage_started
 
             stage_started = time.perf_counter_ns()
             details["active_phase"] = "group_validation"
             try:
                 self._validate_group_structure(model)
             finally:
-                details["group_validation_ns"] = (
-                    time.perf_counter_ns() - stage_started
-                )
+                details["group_validation_ns"] = time.perf_counter_ns() - stage_started
 
             stage_started = time.perf_counter_ns()
             details["active_phase"] = "device_transfer"
             try:
                 model.to(device)
             finally:
-                details["device_transfer_ns"] = (
-                    time.perf_counter_ns() - stage_started
-                )
+                details["device_transfer_ns"] = time.perf_counter_ns() - stage_started
 
             if variant_id != "BF16":
                 stage_started = time.perf_counter_ns()
@@ -752,9 +773,12 @@ class TorchAOProfileExecutor:
                     )
                 logits = result.logits.float()
                 start = prompt_ids.shape[-1] - 1
-                stop = start + len(reference_tokens)
+                position_count = (
+                    1 if query["dataset"] == "MMLU-Pro" else len(reference_tokens)
+                )
+                stop = start + position_count
                 selected = logits[:, start:stop, :]
-                if selected.shape[1] != len(reference_tokens):
+                if selected.shape[1] != position_count:
                     raise _ExecutionFailure("DIAGNOSTIC_LOGIT_LENGTH_MISMATCH")
                 if not bool(torch.isfinite(selected).all().item()):
                     raise _ExecutionFailure("DIAGNOSTIC_NON_FINITE")

@@ -115,8 +115,9 @@ class FunctionalQualityRunner:
                 if variant_id == "BF16":
                     reference_quality[query["query_id"]] = quality_record
 
-            reference = reference_observations[query["query_id"]]
-            for variant_id in variant_ids:
+        for variant_id in variant_ids:
+            for query in self.plan.data["queries"]:
+                reference = reference_observations[query["query_id"]]
                 diagnostic_records.append(
                     self._diagnostic_record(
                         query,
@@ -139,7 +140,7 @@ class FunctionalQualityRunner:
 
         normalized = _normalize_text(text)
         match = re.fullmatch(
-            r"(?:([A-J])(?:[.)])?|Answer:\s*([A-J])|Final answer:\s*([A-J]))",
+            r"(?:([A-J])(?:[.)])?|Answer: ([A-J])|Final answer: ([A-J]))",
             normalized,
         )
         if match is None:
@@ -157,7 +158,11 @@ class FunctionalQualityRunner:
             return
         final_set = set(final_ids)
         for query in queries:
-            if isinstance(query, Mapping) and query.get("source_id") in final_set:
+            if (
+                isinstance(query, Mapping)
+                and query.get("source_id") in final_set
+                and query.get("dataset") != "MMLU-Pro"
+            ):
                 raise ValueError(
                     "final-only query IDs are rejected from quality construction"
                 )
@@ -446,7 +451,7 @@ class FunctionalQualityRunner:
             "evidence_class": self.executor.evidence_class,
             "source_manifest_id": self.plan.source_manifest_id,
             "source_artifact_id": self.plan.data["source_manifest"]["artifact_id"],
-            "source_artifact_ids": [self.plan.data["source_manifest"]["artifact_id"]],
+            "source_artifact_ids": self._source_artifact_ids(),
             "configuration_hash": sha256_canonical(
                 {
                     "model": self.plan.data.get("model"),
@@ -462,6 +467,12 @@ class FunctionalQualityRunner:
             "groups": summaries,
         }
 
+    def _source_artifact_ids(self) -> list[str]:
+        artifact_ids = [self.plan.data["source_manifest"]["artifact_id"]]
+        if self.plan.data["source_manifest"]["dataset"] == "MMLU-Pro":
+            artifact_ids.append(self.plan.data["profile_inventory"]["artifact_id"])
+        return artifact_ids
+
     def _lineage(
         self,
         *,
@@ -475,6 +486,7 @@ class FunctionalQualityRunner:
             "schema_version": schema_version,
             "source_manifest_id": self.plan.source_manifest_id,
             "source_artifact_id": self.plan.data["source_manifest"]["artifact_id"],
+            "source_artifact_ids": self._source_artifact_ids(),
             "configuration_hash": sha256_canonical(
                 {
                     "model": self.plan.data.get("model"),
