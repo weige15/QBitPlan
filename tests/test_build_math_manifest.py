@@ -26,7 +26,7 @@ def _write_source_record(root: Path, source_id: str, problem: str) -> None:
 
 
 def test_canonical_json_uses_sorted_utf8_json_identity() -> None:
-    assert canonical_json_bytes({"b": 2, "a": "é"}) == '{"a":"é","b":2}'.encode("utf-8")
+    assert canonical_json_bytes({"b": 2, "a": "é"}) == '{"a":"é","b":2}'.encode()
 
 
 def test_build_command_writes_separated_manifest_and_smoke_plan(tmp_path: Path) -> None:

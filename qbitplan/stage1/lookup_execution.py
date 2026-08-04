@@ -42,7 +42,7 @@ def _cost_observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
     for dimension in COST_DIMENSIONS:
         value = vector[dimension]
         if not isinstance(value, Mapping):
-            raise ValueError(f"cost vector dimension {dimension} must be an object")
+            raise ValueError(f"cost vector dimension {dimension} must be an object")  # noqa: TRY004
         if value.get("evidence_class") != "lookup-table estimated":
             raise ValueError(f"cost vector dimension {dimension} is not lookup-table estimated")
         if value.get("lookup_artifact_id") != observation["lookup_artifact_id"]:
@@ -69,7 +69,7 @@ def _cost_observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
     if (observation["status"] == "complete") != (omitted == 0):
         raise ValueError("cost adapter terminal status does not match dimension coverage")
     if not isinstance(observation["coverage"], Mapping):
-        raise ValueError("cost adapter observation coverage must be an object")
+        raise ValueError("cost adapter observation coverage must be an object")  # noqa: TRY004
     return dict(observation)
 
 
@@ -82,7 +82,7 @@ def execute_lookup_plan(experiment_plan: ExperimentPlan, executor: Any) -> Any:
         raise ValueError("estimate-cost mode requires the lookup-table estimated adapter")
     metadata_factory = getattr(executor, "lookup_metadata", None)
     if not callable(metadata_factory):
-        raise ValueError("estimate-cost adapter must expose lookup metadata")
+        raise ValueError("estimate-cost adapter must expose lookup metadata")  # noqa: TRY004
     metadata = dict(cast(Mapping[str, Any], metadata_factory()))
     required = {
         "lookup_artifact_id",

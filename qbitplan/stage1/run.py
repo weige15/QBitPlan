@@ -11,7 +11,7 @@ from .contract import ExperimentPlan, ProfileExecutionResult
 class ProfileExecutor(Protocol):
     evidence_class: str
 
-    def execute(self, profile_id: str, query: dict[str, str]) -> ProfileExecutionResult:
+    def execute(self, profile_id: str, query: dict[str, str]) -> ProfileExecutionResult:  # pyright: ignore[reportReturnType]
         """Execute one complete profile/query path and return its status."""
 
 

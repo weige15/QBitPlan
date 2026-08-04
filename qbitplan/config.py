@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .plan import EXPECTED_DECODER, EXPECTED_DETERMINISM, EXPECTED_RUNTIME, EXPECTED_SOFTWARE
+from .plan import (
+    EXPECTED_DECODER,
+    EXPECTED_DETERMINISM,
+    EXPECTED_RUNTIME,
+    EXPECTED_SOFTWARE,
+)
 
 
 def accepted_smoke_configuration(
