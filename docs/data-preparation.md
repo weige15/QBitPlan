@@ -15,8 +15,31 @@ source tree with this layout:
 ```
 
 Each source JSON object must contain the original MATH fields `problem`,
-`solution`, integer `level`, and string `type`. The source-relative POSIX path
+`solution`, `level` (`"Level 1"` through `"Level 5"` or `"Level ?"`, or an integer 1 through 5 in an equivalent canonical export), and string `type`. The source-relative POSIX path
 (for example `test/algebra/807.json`) is the source ID.
+
+## Pinned inputs
+
+The accepted issue-25 acquisition uses the Berkeley source archive snapshot and the pinned MATH-500 JSONL below. Verify the bytes before building the manifest:
+
+```bash
+mkdir -p data/pinned/math-500
+curl -L --fail --retry 3 \
+  'https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar' \
+  -o /tmp/MATH.tar
+printf '0fbe4fad0df66942db6c221cdcc95b298cc7f4595a2f0f518360cce84e90d9ac  /tmp/MATH.tar\n' | sha256sum -c -
+tar -xf /tmp/MATH.tar -C data/pinned
+git clone https://github.com/hendrycks/math.git data/pinned/hendrycks-math
+git -C data/pinned/hendrycks-math checkout --detach 985bdc1696e88e8643f081a0ff4719da39f2ae2a
+curl -L --fail --retry 3 \
+  'https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be/test.jsonl?download=true' \
+  -o data/pinned/math-500/test.jsonl
+printf '35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132  data/pinned/math-500/test.jsonl\n' | sha256sum -c -
+```
+
+The raw source contains exactly 7,500 training and 5,000 test records. The provenance checkout used for the source revision is `hendrycks/math` at commit `985bdc1696e88e8643f081a0ff4719da39f2ae2a`; it is not a substitute for the raw JSON tree.
+The builder records the downloaded Berkeley archive SHA-256 as `artifact_id`, a digest of only the extracted `train/**/*.json` and `test/**/*.json` bytes as `source_tree_artifact_id`, and the MATH-500 file SHA-256 separately. It records a separate `manifest_id` from the canonical manifest payload. The identities must not be conflated. The builder rejects a tree digest mismatch and validates the complete public plan before writing either output.
+
 
 Run:
 
@@ -24,6 +47,7 @@ Run:
 python3 scripts/build_math_manifest.py \
   --source-root /path/to/MATH \
   --math500-root data/pinned/math-500 \
+  --source-archive /tmp/MATH.tar \
   --manifest-output data/manifests/math-source.json \
   --smoke-plan-output data/manifests/math-smoke-plan.json \
   --artifact-root /path/to/artifacts \

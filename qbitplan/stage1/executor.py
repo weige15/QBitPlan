@@ -7,18 +7,19 @@ forward, and ordered group-boundary observation.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import csv
+import gc
 import hashlib
 import io
 import os
 import random
 import subprocess
 import sys
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
 from ..identity import canonical_json_bytes
-from ..plan import ExperimentPlan, MODEL_IDENTIFIER, MODEL_REVISION
+from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
 
 
 class _ExecutionFailure(RuntimeError):
@@ -217,17 +218,19 @@ class TorchAOProfileExecutor:
         device_info = self._resolve_device()
         device = torch.device("cuda", device_info["device_index"])
         try:
-            model = AutoModelForCausalLM.from_pretrained(
+            model = cast(Any, AutoModelForCausalLM.from_pretrained(
                 MODEL_IDENTIFIER,
                 revision=MODEL_REVISION,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=False,
-            )
-            model.to(device)
+            ))
             model.eval()
             if variant_id != "BF16":
-                self._transform_profile(model, variant_id, device)
+                self._transform_profile(model, variant_id)
             self._validate_group_structure(model)
+            model.to(device)
+            if variant_id != "BF16":
+                self._validate_quantized_representation(model, variant_id, device)
         except _ExecutionFailure as exc:
             self._profile_failures[variant_id] = exc
             self._release_model()
@@ -247,9 +250,28 @@ class TorchAOProfileExecutor:
         self._active_model = model
         return model
 
+    @staticmethod
+    def _validate_quantized_representation(model: Any, variant_id: str, device: Any) -> None:
+        try:
+            from torchao.dtypes.affine_quantized_tensor import AffineQuantizedTensor
+        except ImportError as exc:
+            raise _ExecutionFailure("TORCHAO_REPRESENTATION_UNAVAILABLE", transform=True) from exc
+        modules = dict(model.named_modules())
+        for group_index in range(8):
+            for fqn in TorchAOProfileExecutor._group_targets(group_index):
+                weight = getattr(modules[fqn], "weight", None)
+                if not isinstance(weight, AffineQuantizedTensor):
+                    raise _ExecutionFailure(
+                        f"TRANSFORM_REPRESENTATION_NOT_TORCHAO:{variant_id}", transform=True
+                    )
+                if weight.device != device:
+                    raise _ExecutionFailure("TRANSFORM_REPRESENTATION_DEVICE_MISMATCH", transform=True)
+
+
     def _release_model(self) -> None:
         if self._active_model is not None:
             del self._active_model
+            gc.collect()
         self._active_model = None
         self._active_variant = None
         try:
@@ -277,9 +299,13 @@ class TorchAOProfileExecutor:
             for suffix in suffixes
         }
 
-    def _transform_profile(self, model: Any, variant_id: str, device: Any) -> None:
+    def _transform_profile(self, model: Any, variant_id: str) -> None:
         try:
-            from torchao.quantization import int4_weight_only, int8_weight_only, quantize_
+            from torchao.quantization import (
+                int4_weight_only,
+                int8_weight_only,
+                quantize_,
+            )
         except ImportError as exc:
             raise _ExecutionFailure("TORCHAO_UNAVAILABLE", transform=True) from exc
         all_targets = {fqn for group_index in range(8) for fqn in self._group_targets(group_index)}
@@ -297,16 +323,22 @@ class TorchAOProfileExecutor:
             targets = self._group_targets(group_index)
             seen: set[str] = set()
 
-            def filter_fn(module: Any, fqn: str) -> bool:
+            def filter_fn(
+                module: Any,
+                fqn: str,
+                *,
+                target_set: set[str] = targets,
+                seen_set: set[str] = seen,
+            ) -> bool:
                 del module
-                if fqn in targets:
-                    seen.add(fqn)
+                if fqn in target_set:
+                    seen_set.add(fqn)
                     return True
                 return False
 
             config = int4_weight_only(group_size=128) if bit == "0" else int8_weight_only()
             try:
-                quantize_(model, config, filter_fn=filter_fn, device=device, set_inductor_config=False)
+                quantize_(model, config, filter_fn=filter_fn, set_inductor_config=False)
             except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
                 raise _ExecutionFailure(
                     f"TRANSFORM_FAILED_GROUP_{group_index}:{type(exc).__name__}", transform=True
@@ -373,7 +405,6 @@ class TorchAOProfileExecutor:
         observed_groups: set[int] = set()
         handles = []
         layers = model.model.layers
-        bits = "BF16" if variant_id == "BF16" else variant_id
         for group_index in range(8):
             layer = layers[(group_index + 1) * 4 - 1]
 
@@ -381,7 +412,7 @@ class TorchAOProfileExecutor:
                 del module, inputs, output
                 if index not in observed_groups:
                     observed_groups.add(index)
-                    prefix.append({"group_index": index, "prefix_bits": bits[: index + 1]})
+                    prefix.append({"group_index": index, "prefix_bits": "BF16" if variant_id == "BF16" else variant_id[: index + 1]})
 
             handles.append(layer.register_forward_hook(hook))
         try:

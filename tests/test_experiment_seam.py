@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import qbitplan.plan as plan_module
 from qbitplan import execute_plan
 from qbitplan.plan import canonical_json_bytes
-
 
 EXPECTED_SOFTWARE = {
     "python": "3.12.3",
@@ -37,6 +38,12 @@ def _prompt(problem: str) -> str:
     )
 
 
+def _with_manifest_id(value: dict[str, Any]) -> dict[str, Any]:
+    value = dict(value)
+    value["manifest_id"] = _sha256(value)
+    return value
+
+
 def _source_manifest() -> dict[str, Any]:
     records = {
         "train/0.json": _record("training problem"),
@@ -51,7 +58,7 @@ def _source_manifest() -> dict[str, Any]:
         },
         "final_source_ids": ["test/final.json"],
     }
-    return {
+    return _with_manifest_id({
         **identity,
         "record_hash_algorithm": "SHA-256(canonical JSON record)",
         "record_id_format": "source-relative POSIX JSON path",
@@ -61,10 +68,20 @@ def _source_manifest() -> dict[str, Any]:
             "final": {"test/final.json": "0000000000000000000000000000000000000000000000000000000000000000"},
         },
         "counts": {"training": 1, "validation": 1, "final": 1},
-        "artifact_id": _sha256(identity),
-    }
+        "artifact_id": "1" * 64,
+        "raw_artifact": {
+            "artifact_id": "1" * 64,
+            "source_tree_artifact_id": "2" * 64,
+            "source_archive_url": "https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar",
+            "source_archive_sha256": "1" * 64,
+            "source_layout": "train/**/*.json + test/**/*.json",
+            "source_file_count": 2,
+            "math500_file": "test.jsonl",
+            "math500_file_sha256": "0" * 64,
+        },
 
 
+    })
 def _sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -162,7 +179,7 @@ class FakeExecutor:
     def hardware_identity(self) -> dict[str, str]:
         return {"gpu_uuid": "test-gpu-uuid", "gpu_name": "test adapter"}
 
-    def execute(self, query: dict[str, Any], variant_id: str) -> dict[str, Any]:
+    def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
         if variant_id == self.failing_profile:
             return {
                 "status": "invalid",
@@ -184,7 +201,7 @@ class FakeExecutor:
             "observed_group_prefix": [
                 {
                     "group_index": group_index,
-                    "prefix_bits": profile_bits[: group_index + 1],
+                    "prefix_bits": "BF16" if variant_id == "BF16" else profile_bits[: group_index + 1],
                 }
                 for group_index in range(8)
             ],
@@ -192,13 +209,26 @@ class FakeExecutor:
         }
 
 
-def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path) -> None:
+
+
+def _patch_synthetic_manifest_constants(monkeypatch) -> None:
+    monkeypatch.setattr(plan_module, "MATH_SOURCE_ARCHIVE_SHA256", "1" * 64)
+    monkeypatch.setattr(plan_module, "MATH500_SHA256", "0" * 64)
+    monkeypatch.setattr(plan_module, "MATH_SOURCE_TRAINING_COUNT", 1)
+    monkeypatch.setattr(plan_module, "MATH_SOURCE_VALIDATION_COUNT", 1)
+    monkeypatch.setattr(plan_module, "MATH_FINAL_COUNT", 1)
+    monkeypatch.setattr(plan_module, "MATH_SOURCE_FILE_COUNT", 2)
+    monkeypatch.setattr(plan_module, "MATH_SOURCE_TREE_ARTIFACT_ID", "2" * 64)
+
+
+def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path, monkeypatch) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
     bundle = execute_plan(_plan(tmp_path), executor=FakeExecutor())
 
     assert bundle.path.is_dir()
     assert bundle.run_id
     metadata = json.loads((bundle.path / "bundle.json").read_text(encoding="utf-8"))
-    assert metadata["source_manifest_id"] == _sha256(_source_manifest())
+    assert metadata["source_manifest_id"] == _source_manifest()["manifest_id"]
     assert metadata["evidence_class"] == "simulated"
     assert metadata["claim_scope"] == "executable-path smoke only"
     assert set(metadata["files"]) == {
@@ -214,12 +244,13 @@ def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path) -> Non
     ]
     assert len(outcomes) == 8
     assert {row["status"] for row in outcomes} == {"complete"}
-    assert all(row["source_manifest_id"] == _sha256(_source_manifest()) for row in outcomes)
+    assert all(row["source_manifest_id"] == _source_manifest()["manifest_id"] for row in outcomes)
     assert all(row["evidence_class"] == "simulated" for row in outcomes)
     assert len((bundle.path / "group-boundaries.ndjson").read_text(encoding="utf-8").splitlines()) == 64
 
 
-def test_profile_transform_failure_is_immutable_and_has_no_substitute(tmp_path: Path) -> None:
+def test_profile_transform_failure_is_immutable_and_has_no_substitute(tmp_path: Path, monkeypatch) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
     bundle = execute_plan(_plan(tmp_path), executor=FakeExecutor("00000000"))
     outcomes = [
         json.loads(line)
@@ -238,7 +269,8 @@ def test_profile_transform_failure_is_immutable_and_has_no_substitute(tmp_path: 
     }
 
 
-def test_plan_rejects_unavailable_defaults_before_adapter_execution(tmp_path: Path) -> None:
+def test_plan_rejects_unavailable_defaults_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
     plan = _plan(tmp_path)
     del plan["runtime"]["padding"]
     executor = FakeExecutor()

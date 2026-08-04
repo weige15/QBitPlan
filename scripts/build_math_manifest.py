@@ -10,19 +10,24 @@ Hugging Face caches or the combined Parquet cache used by earlier work.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
 import hashlib
 import json
-from pathlib import Path
 import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
 from qbitplan.config import accepted_smoke_configuration
 from qbitplan.identity import canonical_json_bytes as canonical_artifact_json_bytes
-from qbitplan.plan import math_prompt
-
+from qbitplan.plan import ExperimentPlan, math_prompt
 
 DATASET = "MATH"
 SOURCE_REVISION = "985bdc1696e88e8643f081a0ff4719da39f2ae2a"
+SOURCE_ARCHIVE_URL = "https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar"
+SOURCE_ARCHIVE_SHA256 = "0fbe4fad0df66942db6c221cdcc95b298cc7f4595a2f0f518360cce84e90d9ac"
+SOURCE_TREE_ARTIFACT_ID = "d6d24801c6380e8f325c6fa7b226807a81c8f3bcc5f753f31c7adf7d523860ba"
+MATH500_URL = "https://huggingface.co/datasets/HuggingFaceH4/MATH-500/resolve/6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be/test.jsonl?download=true"
+MATH500_SHA256 = "35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132"
 EXPECTED_TRAINING_COUNT = 7_500
 EXPECTED_SOURCE_TEST_COUNT = 5_000
 EXPECTED_FINAL_COUNT = 500
@@ -99,8 +104,11 @@ def _validate_source_record(record: Mapping[str, Any], path: Path) -> None:
         raise ManifestBuildError(f"source record {path} is missing fields: {missing}")
     if not isinstance(record["problem"], str) or not isinstance(record["solution"], str):
         raise ManifestBuildError(f"source record text fields must be strings: {path}")
-    if isinstance(record["level"], bool) or not isinstance(record["level"], int):
-        raise ManifestBuildError(f"source record level must be an integer: {path}")
+    level = record["level"]
+    valid_integer_level = isinstance(level, int) and not isinstance(level, bool) and 1 <= level <= 5
+    valid_original_level = isinstance(level, str) and level in {*(f"Level {index}" for index in range(1, 6)), "Level ?"}
+    if not (valid_integer_level or valid_original_level):
+        raise ManifestBuildError(f"source record level must be an integer 1-5 or original 'Level N' or 'Level ?' text: {path}")
     if not isinstance(record["type"], str):
         raise ManifestBuildError(f"source record type must be a string: {path}")
 
@@ -185,7 +193,22 @@ def _record_hashes(records: Mapping[str, Mapping[str, Any]], ids: Sequence[str])
 
 
 
-def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _source_tree_artifact_id(source_root: Path, source_ids: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    try:
+        for source_id in sorted(source_ids):
+            raw = (source_root / source_id).read_bytes()
+            digest.update(source_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(len(raw).to_bytes(8, "big"))
+            digest.update(raw)
+    except OSError as exc:
+        raise ManifestBuildError(f"cannot read raw dataset bytes: {exc}") from exc
+    return digest.hexdigest()
+
+
+
+def build_artifacts(source_root: Path, math500_root: Path, source_archive: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     source_root = source_root.resolve()
     math500_root = math500_root.resolve()
     if not source_root.exists():
@@ -194,10 +217,13 @@ def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, An
         raise ManifestBuildError(f"source root is not a directory: {source_root}")
     if not math500_root.is_dir():
         raise ManifestBuildError(f"MATH-500 root is not a directory: {math500_root}")
+    if not source_archive.is_file():
+        raise ManifestBuildError(f"source archive is not a file: {source_archive}")
 
     training_records = _load_split(source_root, "train")
     source_test_records = _load_split(source_root, "test")
     final_ids = _load_math500_ids(math500_root)
+    math500_path = math500_root / MATH500_JSONL
 
     if len(training_records) != EXPECTED_TRAINING_COUNT:
         raise ManifestBuildError(
@@ -235,17 +261,39 @@ def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, An
         },
         "final_source_ids": final_ids,
     }
-    artifact_id = sha256_canonical(identity)
     record_hashes = {
         "training": _record_hashes(training_records, training_ids),
         "validation": _record_hashes(source_test_records, validation_ids),
         "final": _record_hashes(source_test_records, final_ids),
     }
-    manifest = {
+    source_tree_artifact_id = _source_tree_artifact_id(source_root, [*training_ids, *source_test_ids])
+    if source_tree_artifact_id != SOURCE_TREE_ARTIFACT_ID:
+        raise ManifestBuildError("extracted source tree does not match the pinned acquisition")
+    try:
+        source_archive_sha256 = hashlib.sha256(source_archive.read_bytes()).hexdigest()
+        math500_sha256 = hashlib.sha256(math500_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ManifestBuildError(f"cannot read pinned input bytes: {exc}") from exc
+    if source_archive_sha256 != SOURCE_ARCHIVE_SHA256:
+        raise ManifestBuildError("source archive SHA-256 does not match the pinned acquisition")
+    if math500_sha256 != MATH500_SHA256:
+        raise ManifestBuildError("MATH-500 SHA-256 does not match the pinned acquisition")
+    artifact_id = source_archive_sha256
+    manifest_payload = {
         **identity,
         "record_hash_algorithm": "SHA-256(canonical JSON record)",
         "record_id_format": "source-relative POSIX JSON path",
         "record_hashes": record_hashes,
+        "raw_artifact": {
+            "artifact_id": artifact_id,
+            "source_tree_artifact_id": source_tree_artifact_id,
+            "source_archive_url": SOURCE_ARCHIVE_URL,
+            "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+            "source_layout": "train/**/*.json + test/**/*.json",
+            "source_file_count": len(training_ids) + len(source_test_ids),
+            "math500_file": MATH500_JSONL,
+            "math500_file_sha256": MATH500_SHA256,
+        },
         "counts": {
             "training": len(training_ids),
             "validation": len(validation_ids),
@@ -253,6 +301,7 @@ def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, An
         },
         "artifact_id": artifact_id,
     }
+    manifest = {**manifest_payload, "manifest_id": sha256_canonical(manifest_payload)}
 
     smoke_ids = (("training", training_ids[0]), ("validation", validation_ids[0]))
     source_records = {**training_records, **source_test_records}
@@ -312,6 +361,12 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="explicit pinned MATH-500 checkout containing test.jsonl",
     )
+    parser.add_argument(
+        "--source-archive",
+        type=Path,
+        required=True,
+        help="downloaded Berkeley MATH.tar whose SHA-256 matches the pinned snapshot",
+    )
     parser.add_argument("--manifest-output", type=Path, required=True)
     parser.add_argument("--smoke-plan-output", type=Path, required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
@@ -325,10 +380,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.manifest_output.resolve() == args.smoke_plan_output.resolve():
             raise ManifestBuildError("manifest and smoke-plan outputs must be different files")
-        manifest, smoke_plan = build_artifacts(args.source_root, args.math500_root)
+        manifest, smoke_plan = build_artifacts(args.source_root, args.math500_root, args.source_archive)
         if args.manifest_output.exists() or args.smoke_plan_output.exists():
             raise ManifestBuildError("refusing to overwrite an existing immutable output")
-        _write_once(args.manifest_output, manifest)
         smoke_plan = {
             **accepted_smoke_configuration(
                 artifact_root=str(args.artifact_root),
@@ -338,6 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_manifest": smoke_plan["source_manifest"],
             "queries": smoke_plan["queries"],
         }
+        ExperimentPlan.from_mapping(smoke_plan)
+        _write_once(args.manifest_output, manifest)
         _write_once(args.smoke_plan_output, smoke_plan)
     except (ManifestBuildError, OSError) as exc:
         print(f"build_math_manifest: rejected: {exc}", file=sys.stderr)

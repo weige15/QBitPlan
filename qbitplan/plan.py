@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .identity import canonical_json_bytes, sha256_canonical
+from .identity import canonical_json_bytes, sha256_canonical  # noqa: F401
 
 MODEL_IDENTIFIER = "meta-llama/Llama-3.1-8B"
 MODEL_REVISION = "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b"
 MATH_SOURCE_REVISION = "985bdc1696e88e8643f081a0ff4719da39f2ae2a"
+MATH_SOURCE_ARCHIVE_URL = "https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar"
+MATH_SOURCE_ARCHIVE_SHA256 = "0fbe4fad0df66942db6c221cdcc95b298cc7f4595a2f0f518360cce84e90d9ac"
+MATH500_SHA256 = "35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132"
+MATH_SOURCE_TRAINING_COUNT = 7_500
+MATH_SOURCE_VALIDATION_COUNT = 4_500
+MATH_FINAL_COUNT = 500
+MATH_SOURCE_FILE_COUNT = 12_500
+MATH_SOURCE_TREE_ARTIFACT_ID = "d6d24801c6380e8f325c6fa7b226807a81c8f3bcc5f753f31c7adf7d523860ba"
 EXPECTED_PROFILES = ("BF16", "00000000", "11111111", "01010101")
 EXPECTED_SOFTWARE = {
     "python": "3.12.3",
@@ -96,6 +104,14 @@ def _require_equal(value: Mapping[str, Any], expected: Mapping[str, Any], label:
             )
 
 
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
 def math_prompt(problem: str) -> str:
     return (
         "Problem:\n"
@@ -115,6 +131,8 @@ def _validate_source_manifest(value: Mapping[str, Any]) -> None:
         "record_hash_algorithm",
         "record_id_format",
         "record_hashes",
+        "raw_artifact",
+        "manifest_id",
         "counts",
         "artifact_id",
     }
@@ -142,20 +160,69 @@ def _validate_source_manifest(value: Mapping[str, Any]) -> None:
         phase_hashes = _require_mapping(hashes[phase], f"source_manifest.record_hashes.{phase}")
         if set(phase_hashes) != set(ids):
             raise ValueError(f"source_manifest.record_hashes.{phase} does not match its source IDs")
-        if not all(isinstance(item, str) and len(item) == 64 for item in phase_hashes.values()):
+        if not all(_is_sha256_hex(item) for item in phase_hashes.values()):
             raise ValueError(f"source_manifest.record_hashes.{phase} contains invalid hashes")
     counts = _require_mapping(value["counts"], "source_manifest.counts")
     _require_exact_keys(counts, {"training", "validation", "final"}, "source_manifest.counts")
     if counts != {phase: len(ids) for phase, ids in (("training", permitted["training"]), ("validation", permitted["validation"]), ("final", final_ids))}:
         raise ValueError("source_manifest.counts does not match source ID manifests")
-    identity = {
-        "dataset": value["dataset"],
-        "source_revision": value["source_revision"],
-        "permitted_source_ids": permitted,
-        "final_source_ids": final_ids,
-    }
-    if value["artifact_id"] != sha256_canonical(identity):
-        raise ValueError("source_manifest.artifact_id does not match its canonical identity")
+    if counts != {
+        "training": MATH_SOURCE_TRAINING_COUNT,
+        "validation": MATH_SOURCE_VALIDATION_COUNT,
+        "final": MATH_FINAL_COUNT,
+    }:
+        raise ValueError("source_manifest.counts must match the pinned MATH split")
+    raw_artifact = _require_mapping(value["raw_artifact"], "source_manifest.raw_artifact")
+    _require_exact_keys(
+        raw_artifact,
+        {
+            "artifact_id",
+            "source_tree_artifact_id",
+            "source_archive_url",
+            "source_archive_sha256",
+            "source_layout",
+            "source_file_count",
+            "math500_file",
+            "math500_file_sha256",
+        },
+        "source_manifest.raw_artifact",
+    )
+    if raw_artifact["artifact_id"] != value["artifact_id"]:
+        raise ValueError("source_manifest.raw_artifact.artifact_id does not match artifact_id")
+    if raw_artifact["artifact_id"] != MATH_SOURCE_ARCHIVE_SHA256:
+        raise ValueError("source_manifest.artifact_id must match the pinned Berkeley source archive")
+    if raw_artifact["source_archive_url"] != MATH_SOURCE_ARCHIVE_URL:
+        raise ValueError("source_manifest.raw_artifact.source_archive_url must match the pinned acquisition")
+    if raw_artifact["source_archive_sha256"] != MATH_SOURCE_ARCHIVE_SHA256:
+        raise ValueError("source_manifest.raw_artifact.source_archive_sha256 must match the pinned acquisition")
+    if raw_artifact["source_tree_artifact_id"] != MATH_SOURCE_TREE_ARTIFACT_ID:
+        raise ValueError("source_manifest.raw_artifact.source_tree_artifact_id must match the pinned source tree")
+    if raw_artifact["source_file_count"] != MATH_SOURCE_FILE_COUNT:
+        raise ValueError("source_manifest.raw_artifact.source_file_count must match the pinned source tree")
+    if raw_artifact["math500_file_sha256"] != MATH500_SHA256:
+        raise ValueError("source_manifest.raw_artifact.math500_file_sha256 must match the pinned MATH-500 input")
+    if not _is_sha256_hex(value["artifact_id"]):
+        raise ValueError("source_manifest.artifact_id must be a SHA-256 hex digest")
+    if not _is_sha256_hex(raw_artifact["source_tree_artifact_id"]):
+        raise ValueError("source_manifest.raw_artifact.source_tree_artifact_id must be a SHA-256 hex digest")
+    if not isinstance(raw_artifact["source_archive_url"], str) or not raw_artifact["source_archive_url"]:
+        raise ValueError("source_manifest.raw_artifact.source_archive_url must be a non-empty string")
+    if not _is_sha256_hex(raw_artifact["source_archive_sha256"]):
+        raise ValueError("source_manifest.raw_artifact.source_archive_sha256 must be a SHA-256 hex digest")
+    if not isinstance(raw_artifact["source_file_count"], int) or raw_artifact["source_file_count"] <= 0:
+        raise ValueError("source_manifest.raw_artifact.source_file_count must be positive")
+    if not isinstance(raw_artifact["source_layout"], str) or not raw_artifact["source_layout"]:
+        raise ValueError("source_manifest.raw_artifact.source_layout must be a non-empty string")
+    if not isinstance(raw_artifact["math500_file"], str) or not raw_artifact["math500_file"]:
+        raise ValueError("source_manifest.raw_artifact.math500_file must be a non-empty string")
+    if not _is_sha256_hex(raw_artifact["math500_file_sha256"]):
+        raise ValueError("source_manifest.raw_artifact.math500_file_sha256 must be a SHA-256 hex digest")
+    if not _is_sha256_hex(value["manifest_id"]):
+        raise ValueError("source_manifest.manifest_id must be a SHA-256 hex digest")
+    manifest_payload = dict(value)
+    del manifest_payload["manifest_id"]
+    if value["manifest_id"] != sha256_canonical(manifest_payload):
+        raise ValueError("source_manifest.manifest_id does not match its canonical manifest payload")
 
 
 def _validate_queries(value: Any, source_manifest: Mapping[str, Any]) -> None:
@@ -211,7 +278,7 @@ class ExperimentPlan:
     data: dict[str, Any]
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "ExperimentPlan":
+    def from_mapping(cls, value: Mapping[str, Any]) -> ExperimentPlan:
         raw = dict(value)
         _require_exact_keys(
             raw,
@@ -276,7 +343,7 @@ class ExperimentPlan:
 
     @property
     def source_manifest_id(self) -> str:
-        return sha256_canonical(self.data["source_manifest"])
+        return self.data["source_manifest"]["manifest_id"]
 
     def to_mapping(self) -> dict[str, Any]:
         return copy.deepcopy(self.data)
