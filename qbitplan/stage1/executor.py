@@ -8,6 +8,7 @@ forward, and ordered group-boundary observation.
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import io
 import os
@@ -15,6 +16,7 @@ import random
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from ..identity import canonical_json_bytes
@@ -28,8 +30,28 @@ class _ExecutionFailure(RuntimeError):
         self.transform = transform
 
 
+@dataclass(frozen=True)
+class _FailureRecord:
+    """Traceback-free cached failure for a profile already known to be invalid."""
+
+    reason_code: str
+    transform: bool
+
+    @classmethod
+    def from_exception(cls, exc: _ExecutionFailure) -> _FailureRecord:
+        return cls(reason_code=exc.reason_code, transform=exc.transform)
+
+    def to_exception(self) -> _ExecutionFailure:
+        return _ExecutionFailure(self.reason_code, transform=self.transform)
+
+
 class TorchAOProfileExecutor:
-    """Execute every declared profile on the pinned RTX 3090."""
+    """Execute every declared profile on the pinned RTX 3090.
+
+    Quantized variants are prepared and validated on CPU before the completed
+    representation is transferred to the selected GPU. This avoids holding the
+    full BF16 CUDA allocation while TorchAO constructs replacement weights.
+    """
 
     evidence_class = "directly measured"
 
@@ -39,7 +61,7 @@ class TorchAOProfileExecutor:
         self._tokenizer: Any | None = None
         self._active_variant: str | None = None
         self._active_model: Any | None = None
-        self._profile_failures: dict[str, _ExecutionFailure] = {}
+        self._profile_failures: dict[str, _FailureRecord] = {}
 
     def hardware_identity(self) -> Mapping[str, Any]:
         return dict(self._resolve_device())
@@ -202,8 +224,9 @@ class TorchAOProfileExecutor:
     def _model_for_variant(self, variant_id: str) -> Any:
         if variant_id not in self.plan.data["profiles"]:
             raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
-        if variant_id in self._profile_failures:
-            raise self._profile_failures[variant_id]
+        cached_failure = self._profile_failures.get(variant_id)
+        if cached_failure is not None:
+            raise cached_failure.to_exception()
         if self._active_variant == variant_id and self._active_model is not None:
             return self._active_model
         self._release_model()
@@ -212,10 +235,12 @@ class TorchAOProfileExecutor:
             from transformers import AutoModelForCausalLM
         except ImportError as exc:
             failure = _ExecutionFailure("MODEL_RUNTIME_UNAVAILABLE")
-            self._profile_failures[variant_id] = failure
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
             raise failure from exc
         device_info = self._resolve_device()
-        device = torch.device("cuda", device_info["device_index"])
+        cpu_device = torch.device("cpu")
+        cuda_device = torch.device("cuda", device_info["device_index"])
+        model: Any | None = None
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL_IDENTIFIER,
@@ -223,35 +248,39 @@ class TorchAOProfileExecutor:
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=False,
             )
-            model.to(device)  # type: ignore[arg-type]
+            model.to(cpu_device)  # type: ignore[arg-type]
             model.eval()
             if variant_id != "BF16":
-                self._transform_profile(model, variant_id, device)
+                self._transform_profile(model, variant_id, cpu_device)
             self._validate_group_structure(model)
+            model.to(cuda_device)  # type: ignore[arg-type]
         except _ExecutionFailure as exc:
-            self._profile_failures[variant_id] = exc
-            self._release_model()
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(exc)
+            model = None
+            self._collect_released_memory()
             raise
         except RuntimeError as exc:
             reason = "OOM" if "out of memory" in str(exc).lower() else "TRANSFORM_OR_LOAD_RUNTIME_ERROR"
             failure = _ExecutionFailure(reason, transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
+            model = None
+            self._collect_released_memory()
             raise failure from exc
         except OSError as exc:
             failure = _ExecutionFailure("MODEL_LOAD_FAILED", transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
+            model = None
+            self._collect_released_memory()
             raise failure from exc
+        if model is None:
+            raise _ExecutionFailure("MODEL_LOAD_FAILED", transform=variant_id != "BF16")
         self._active_variant = variant_id
         self._active_model = model
         return model
 
-    def _release_model(self) -> None:
-        if self._active_model is not None:
-            del self._active_model
-        self._active_model = None
-        self._active_variant = None
+    @staticmethod
+    def _collect_released_memory() -> None:
+        gc.collect()
         try:
             import torch
 
@@ -259,6 +288,14 @@ class TorchAOProfileExecutor:
                 torch.cuda.empty_cache()
         except ImportError:
             pass
+
+    def _release_model(self) -> None:
+        active_model = self._active_model
+        self._active_model = None
+        self._active_variant = None
+        if active_model is not None:
+            del active_model
+        self._collect_released_memory()
 
     @staticmethod
     def _group_targets(group_index: int) -> set[str]:
