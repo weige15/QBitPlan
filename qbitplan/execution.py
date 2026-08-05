@@ -75,14 +75,29 @@ def _canonical_ndjson(records: Sequence[Mapping[str, Any]]) -> bytes:
     return b"".join(canonical_json_bytes(record) + b"\n" for record in records)
 
 
+_FAILURE_METADATA_FIELDS = frozenset(
+    {
+        "failure_phase",
+        "group_index",
+        "bit_width",
+        "failing_fqn",
+        "exception_type",
+        "exception_message",
+    }
+)
+_EMPTY_FAILURE_METADATA = {field: None for field in _FAILURE_METADATA_FIELDS}
+
+
 def _invalid_observation(reason_code: str) -> dict[str, Any]:
     return {
         "status": "invalid",
         "transform_status": "invalid",
+        "cuda_transfer_status": "not_attempted",
         "forward_status": "not_attempted",
         "reason_code": reason_code,
         "transform_reason_code": reason_code,
         "forward_reason_code": "TRANSFORM_FAILED",
+        "failure_metadata": dict(_EMPTY_FAILURE_METADATA),
         "observed_group_prefix": [],
     }
 
@@ -100,6 +115,41 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
     missing = sorted(required - set(observation))
     if missing:
         raise ValueError(f"executor observation is missing fields: {missing}")
+    observation = dict(observation)
+    if "cuda_transfer_status" not in observation:
+        observation["cuda_transfer_status"] = (
+            "complete"
+            if observation["forward_status"] == "complete"
+            or (
+                observation["transform_status"] == "complete"
+                and observation["forward_status"] == "invalid"
+            )
+            else "not_attempted"
+        )
+    if "failure_metadata" not in observation:
+        observation["failure_metadata"] = dict(_EMPTY_FAILURE_METADATA)
+    if observation["cuda_transfer_status"] not in {"complete", "invalid", "not_attempted"}:
+        raise ValueError("executor observation has an unsupported CUDA transfer status")
+    metadata = observation["failure_metadata"]
+    if not isinstance(metadata, Mapping):
+        raise TypeError("executor failure metadata must be an object")
+    if set(metadata) != _FAILURE_METADATA_FIELDS:
+        raise ValueError("executor failure metadata has unspecified fields")
+    if metadata["failure_phase"] is not None and not isinstance(metadata["failure_phase"], str):
+        raise TypeError("executor failure phase must be a string or null")
+    if metadata["group_index"] is not None and (
+        isinstance(metadata["group_index"], bool) or not isinstance(metadata["group_index"], int)
+    ):
+        raise TypeError("executor failure group index must be an integer or null")
+    if metadata["bit_width"] is not None and metadata["bit_width"] not in {4, 8}:
+        raise ValueError("executor failure bit width must be 4, 8, or null")
+    for field in ("failing_fqn", "exception_type", "exception_message"):
+        value = metadata[field]
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"executor failure {field} must be a string or null")
+        if field == "exception_message" and value is not None and len(value) > 512:
+            raise ValueError("executor failure exception message exceeds its bound")
+    observation["failure_metadata"] = dict(metadata)
     if observation["status"] not in {"complete", "invalid"}:
         raise ValueError("executor observation has an unsupported terminal status")
     if observation["transform_status"] not in {"complete", "invalid", "not_applicable"}:
@@ -362,6 +412,7 @@ def execute_plan(
                 "profile_bits": _profile_bits(variant_id),
                 "status": observation["status"],
                 "transform_status": observation["transform_status"],
+                "cuda_transfer_status": observation["cuda_transfer_status"],
                 "terminal_status": observation["status"],
                 "executable": observation["status"] == "complete"
                 and observation["forward_status"] == "complete"
@@ -370,6 +421,7 @@ def execute_plan(
                 "reason_code": observation["reason_code"],
                 "transform_reason_code": observation["transform_reason_code"],
                 "forward_reason_code": observation["forward_reason_code"],
+                "failure_metadata": observation["failure_metadata"],
             }
             for field in ("token_count", "output_hash"):
                 if field in observation:

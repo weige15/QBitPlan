@@ -8,6 +8,7 @@ forward, and ordered group-boundary observation.
 from __future__ import annotations
 
 import csv
+import gc
 import hashlib
 import io
 import os
@@ -15,21 +16,107 @@ import random
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from ..identity import canonical_json_bytes
 from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
 
 
+_MAX_FAILURE_MESSAGE_LENGTH = 512
+
+
+def _bounded_exception_message(exc: BaseException) -> str:
+    message = str(exc)
+    if len(message) <= _MAX_FAILURE_MESSAGE_LENGTH:
+        return message
+    return message[: _MAX_FAILURE_MESSAGE_LENGTH - 3] + "..."
+
+
+@dataclass(frozen=True)
+class _FailureMetadata:
+    failure_phase: str | None = None
+    group_index: int | None = None
+    bit_width: int | None = None
+    failing_fqn: str | None = None
+    exception_type: str | None = None
+    exception_message: str | None = None
+
+    @classmethod
+    def from_exception(
+        cls,
+        exc: BaseException,
+        *,
+        failure_phase: str,
+        group_index: int | None = None,
+        bit_width: int | None = None,
+        failing_fqn: str | None = None,
+    ) -> _FailureMetadata:
+        return cls(
+            failure_phase=failure_phase,
+            group_index=group_index,
+            bit_width=bit_width,
+            failing_fqn=failing_fqn,
+            exception_type=type(exc).__name__,
+            exception_message=_bounded_exception_message(exc),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "failure_phase": self.failure_phase,
+            "group_index": self.group_index,
+            "bit_width": self.bit_width,
+            "failing_fqn": self.failing_fqn,
+            "exception_type": self.exception_type,
+            "exception_message": self.exception_message,
+        }
+
+
 class _ExecutionFailure(RuntimeError):
-    def __init__(self, reason_code: str, *, transform: bool = False) -> None:
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        transform: bool = False,
+        failure_metadata: _FailureMetadata | None = None,
+    ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
         self.transform = transform
+        self.failure_metadata = failure_metadata or _FailureMetadata()
+
+
+@dataclass(frozen=True)
+class _FailureRecord:
+    """Traceback-free cached failure for a profile already known to be invalid."""
+
+    reason_code: str
+    transform: bool
+    failure_metadata: _FailureMetadata = _FailureMetadata()
+
+    @classmethod
+    def from_exception(cls, exc: _ExecutionFailure) -> _FailureRecord:
+        return cls(
+            reason_code=exc.reason_code,
+            transform=exc.transform,
+            failure_metadata=exc.failure_metadata,
+        )
+
+    def to_exception(self) -> _ExecutionFailure:
+        return _ExecutionFailure(
+            self.reason_code,
+            transform=self.transform,
+            failure_metadata=self.failure_metadata,
+        )
 
 
 class TorchAOProfileExecutor:
-    """Execute every declared profile on the pinned RTX 3090."""
+    """Execute every declared profile on the pinned RTX 3090.
+
+    Quantized variants are prepared and validated on CPU before the completed
+    representation is transferred to the selected GPU. This avoids holding the
+    full BF16 CUDA allocation while TorchAO constructs replacement weights.
+    """
 
     evidence_class = "directly measured"
 
@@ -39,7 +126,7 @@ class TorchAOProfileExecutor:
         self._tokenizer: Any | None = None
         self._active_variant: str | None = None
         self._active_model: Any | None = None
-        self._profile_failures: dict[str, _ExecutionFailure] = {}
+        self._profile_failures: dict[str, _FailureRecord] = {}
 
     def hardware_identity(self) -> Mapping[str, Any]:
         return dict(self._resolve_device())
@@ -50,35 +137,65 @@ class TorchAOProfileExecutor:
             tokenizer = self._load_tokenizer()
             return self._run_forward(model, tokenizer, query["prompt"], variant_id)
         except _ExecutionFailure as exc:
-            if exc.transform:
-                return {
-                    "status": "invalid",
-                    "transform_status": "invalid",
-                    "forward_status": "not_attempted",
-                    "reason_code": exc.reason_code,
-                    "transform_reason_code": exc.reason_code,
-                    "forward_reason_code": "TRANSFORM_FAILED",
-                    "observed_group_prefix": [],
-                }
-            return {
-                "status": "invalid",
-                "transform_status": "complete" if variant_id != "BF16" else "not_applicable",
-                "forward_status": "invalid",
-                "reason_code": exc.reason_code,
-                "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
-                "forward_reason_code": exc.reason_code,
-                "observed_group_prefix": [],
-            }
+            return self._failure_observation(variant_id, exc)
         except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
-            return {
-                "status": "invalid",
-                "transform_status": "complete" if variant_id != "BF16" else "not_applicable",
-                "forward_status": "invalid",
-                "reason_code": f"FORWARD_EXCEPTION:{type(exc).__name__}",
-                "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
-                "forward_reason_code": f"FORWARD_EXCEPTION:{type(exc).__name__}",
-                "observed_group_prefix": [],
-            }
+            failure = _ExecutionFailure(
+                f"FORWARD_EXCEPTION:{type(exc).__name__}",
+                failure_metadata=_FailureMetadata.from_exception(
+                    exc,
+                    failure_phase="forward" if self._active_variant == variant_id else "runtime",
+                ),
+            )
+            return self._failure_observation(variant_id, failure)
+
+    def _failure_observation(self, variant_id: str, failure: _ExecutionFailure) -> dict[str, Any]:
+        transfer_status = self._cuda_transfer_status(variant_id, failure)
+        transform_status = self._transform_status(variant_id, failure, transfer_status)
+        forward_status = "invalid" if transfer_status == "complete" else "not_attempted"
+        if transform_status == "invalid":
+            transform_reason_code = failure.reason_code
+            forward_reason_code = "TRANSFORM_FAILED"
+        elif variant_id == "BF16":
+            transform_reason_code = "REFERENCE_UNQUANTIZED"
+            forward_reason_code = failure.reason_code
+        else:
+            transform_reason_code = None
+            forward_reason_code = failure.reason_code
+        return {
+            "status": "invalid",
+            "transform_status": transform_status,
+            "cuda_transfer_status": transfer_status,
+            "forward_status": forward_status,
+            "reason_code": failure.reason_code,
+            "transform_reason_code": transform_reason_code,
+            "forward_reason_code": forward_reason_code,
+            "failure_metadata": failure.failure_metadata.to_mapping(),
+            "observed_group_prefix": [],
+        }
+
+    def _transform_status(
+        self,
+        variant_id: str,
+        failure: _ExecutionFailure,
+        transfer_status: str,
+    ) -> str:
+        if variant_id == "BF16":
+            return "not_applicable"
+        if failure.transform:
+            return "invalid"
+        if transfer_status == "complete" or failure.failure_metadata.failure_phase in {"cuda_transfer", "forward"}:
+            return "complete"
+        return "not_attempted"
+
+    def _cuda_transfer_status(self, variant_id: str, failure: _ExecutionFailure) -> str:
+        phase = failure.failure_metadata.failure_phase
+        if phase == "cuda_transfer":
+            return "invalid"
+        if self._active_variant == variant_id and self._active_model is not None:
+            return "complete"
+        if phase == "forward":
+            return "complete"
+        return "not_attempted"
 
     def _resolve_device(self) -> dict[str, Any]:
         if self._device_info is not None:
@@ -202,8 +319,9 @@ class TorchAOProfileExecutor:
     def _model_for_variant(self, variant_id: str) -> Any:
         if variant_id not in self.plan.data["profiles"]:
             raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
-        if variant_id in self._profile_failures:
-            raise self._profile_failures[variant_id]
+        cached_failure = self._profile_failures.get(variant_id)
+        if cached_failure is not None:
+            raise cached_failure.to_exception()
         if self._active_variant == variant_id and self._active_model is not None:
             return self._active_model
         self._release_model()
@@ -211,11 +329,17 @@ class TorchAOProfileExecutor:
             import torch
             from transformers import AutoModelForCausalLM
         except ImportError as exc:
-            failure = _ExecutionFailure("MODEL_RUNTIME_UNAVAILABLE")
-            self._profile_failures[variant_id] = failure
+            failure = _ExecutionFailure(
+                "MODEL_RUNTIME_UNAVAILABLE",
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase="model_load"),
+            )
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
             raise failure from exc
         device_info = self._resolve_device()
-        device = torch.device("cuda", device_info["device_index"])
+        cpu_device = torch.device("cpu")
+        cuda_device = torch.device("cuda", device_info["device_index"])
+        model: Any | None = None
+        phase = "model_load"
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL_IDENTIFIER,
@@ -223,35 +347,55 @@ class TorchAOProfileExecutor:
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=False,
             )
-            model.to(device)  # type: ignore[arg-type]
+            phase = "cpu_prepare"
+            model.to(cpu_device)  # type: ignore[arg-type]
             model.eval()
+            phase = "cpu_transform"
             if variant_id != "BF16":
-                self._transform_profile(model, variant_id, device)
+                self._transform_profile(model, variant_id)
+            phase = "cpu_validation"
             self._validate_group_structure(model)
+            phase = "cuda_transfer"
+            model.to(cuda_device)  # type: ignore[arg-type]
         except _ExecutionFailure as exc:
-            self._profile_failures[variant_id] = exc
-            self._release_model()
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(exc)
+            model = None
+            self._collect_released_memory()
             raise
         except RuntimeError as exc:
             reason = "OOM" if "out of memory" in str(exc).lower() else "TRANSFORM_OR_LOAD_RUNTIME_ERROR"
-            failure = _ExecutionFailure(reason, transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
+            failure = _ExecutionFailure(
+                reason,
+                transform=phase in {"cpu_transform", "cpu_validation"},
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase=phase),
+            )
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
+            model = None
+            self._collect_released_memory()
             raise failure from exc
         except OSError as exc:
-            failure = _ExecutionFailure("MODEL_LOAD_FAILED", transform=variant_id != "BF16")
-            self._profile_failures[variant_id] = failure
-            self._release_model()
+            failure = _ExecutionFailure(
+                "MODEL_LOAD_FAILED",
+                transform=phase in {"cpu_transform", "cpu_validation"},
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase=phase),
+            )
+            self._profile_failures[variant_id] = _FailureRecord.from_exception(failure)
+            model = None
+            self._collect_released_memory()
             raise failure from exc
+        if model is None:
+            raise _ExecutionFailure(
+                "MODEL_LOAD_FAILED",
+                transform=variant_id != "BF16",
+                failure_metadata=_FailureMetadata(failure_phase=phase),
+            )
         self._active_variant = variant_id
         self._active_model = model
         return model
 
-    def _release_model(self) -> None:
-        if self._active_model is not None:
-            del self._active_model
-        self._active_model = None
-        self._active_variant = None
+    @staticmethod
+    def _collect_released_memory() -> None:
+        gc.collect()
         try:
             import torch
 
@@ -259,6 +403,14 @@ class TorchAOProfileExecutor:
                 torch.cuda.empty_cache()
         except ImportError:
             pass
+
+    def _release_model(self) -> None:
+        active_model = self._active_model
+        self._active_model = None
+        self._active_variant = None
+        if active_model is not None:
+            del active_model
+        self._collect_released_memory()
 
     @staticmethod
     def _group_targets(group_index: int) -> set[str]:
@@ -277,7 +429,7 @@ class TorchAOProfileExecutor:
             for suffix in suffixes
         }
 
-    def _transform_profile(self, model: Any, variant_id: str, device: Any) -> None:
+    def _transform_profile(self, model: Any, variant_id: str) -> None:
         try:
             from torchao.quantization import (
                 int4_weight_only,
@@ -285,21 +437,34 @@ class TorchAOProfileExecutor:
                 quantize_,
             )
         except ImportError as exc:
-            raise _ExecutionFailure("TORCHAO_UNAVAILABLE", transform=True) from exc
+            raise _ExecutionFailure(
+                "TORCHAO_UNAVAILABLE",
+                transform=True,
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase="cpu_transform"),
+            ) from exc
         all_targets = {fqn for group_index in range(8) for fqn in self._group_targets(group_index)}
         named_modules = dict(model.named_modules())
         missing = sorted(all_targets - set(named_modules))
         if missing:
-            raise _ExecutionFailure("TRANSFORM_TARGET_MAPPING_INCOMPLETE", transform=True)
+            raise _ExecutionFailure(
+                "TRANSFORM_TARGET_MAPPING_INCOMPLETE",
+                transform=True,
+                failure_metadata=_FailureMetadata(failure_phase="cpu_transform", failing_fqn=missing[0]),
+            )
         before_weight_ids: dict[str, int] = {}
         for fqn in all_targets:
             module = named_modules[fqn]
             if not hasattr(module, "weight"):
-                raise _ExecutionFailure("TRANSFORM_TARGET_WEIGHT_MISSING", transform=True)
+                raise _ExecutionFailure(
+                    "TRANSFORM_TARGET_WEIGHT_MISSING",
+                    transform=True,
+                    failure_metadata=_FailureMetadata(failure_phase="cpu_transform", failing_fqn=fqn),
+                )
             before_weight_ids[fqn] = id(module.weight)
         for group_index, bit in enumerate(variant_id):
             targets = self._group_targets(group_index)
             seen: set[str] = set()
+            failing_fqn: list[str | None] = [None]
 
             def filter_fn(
                 module: Any,
@@ -309,6 +474,7 @@ class TorchAOProfileExecutor:
             ) -> bool:
                 del module
                 if fqn in targets:
+                    failing_fqn[0] = fqn
                     seen.add(fqn)
                     return True
                 return False
@@ -319,16 +485,29 @@ class TorchAOProfileExecutor:
                     model,
                     config,
                     filter_fn=filter_fn,
-                    device=device,
                     set_inductor_config=False,
                 )
             except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
                 raise _ExecutionFailure(
-                    f"TRANSFORM_FAILED_GROUP_{group_index}:{type(exc).__name__}", transform=True
+                    f"TRANSFORM_FAILED_GROUP_{group_index}:{type(exc).__name__}",
+                    transform=True,
+                    failure_metadata=_FailureMetadata.from_exception(
+                        exc,
+                        failure_phase="cpu_transform",
+                        group_index=group_index,
+                        bit_width=4 if bit == "0" else 8,
+                        failing_fqn=failing_fqn[0],
+                    ),
                 ) from exc
             if seen != targets:
                 raise _ExecutionFailure(
-                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}", transform=True
+                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}",
+                    transform=True,
+                    failure_metadata=_FailureMetadata(
+                        failure_phase="cpu_transform",
+                        group_index=group_index,
+                        bit_width=4 if bit == "0" else 8,
+                    ),
                 )
 
         after_modules = dict(model.named_modules())
@@ -337,7 +516,11 @@ class TorchAOProfileExecutor:
             if id(after_modules[fqn].weight) == before_id
         ]
         if unchanged:
-            raise _ExecutionFailure("TRANSFORM_REPRESENTATION_UNCHANGED", transform=True)
+            raise _ExecutionFailure(
+                "TRANSFORM_REPRESENTATION_UNCHANGED",
+                transform=True,
+                failure_metadata=_FailureMetadata(failure_phase="cpu_transform", failing_fqn=unchanged[0]),
+            )
         non_target_before = {
             name: id(module.weight)
             for name, module in named_modules.items()
@@ -350,26 +533,42 @@ class TorchAOProfileExecutor:
             and id(after_modules[fqn].weight) != before_id
         ]
         if changed_non_targets:
-            raise _ExecutionFailure("TRANSFORM_NON_TARGET_CHANGED", transform=True)
+            raise _ExecutionFailure(
+                "TRANSFORM_NON_TARGET_CHANGED",
+                transform=True,
+                failure_metadata=_FailureMetadata(failure_phase="cpu_transform", failing_fqn=changed_non_targets[0]),
+            )
 
     @staticmethod
     def _validate_group_structure(model: Any) -> None:
         layers = getattr(getattr(model, "model", None), "layers", None)
         if layers is None or len(layers) != 32:
-            raise _ExecutionFailure("GROUP_STRUCTURE_UNSUPPORTED", transform=True)
+            raise _ExecutionFailure(
+                "GROUP_STRUCTURE_UNSUPPORTED",
+                transform=True,
+                failure_metadata=_FailureMetadata(failure_phase="cpu_validation"),
+            )
         names = dict(model.named_modules())
         for group_index in range(8):
             targets = TorchAOProfileExecutor._group_targets(group_index)
             if not targets.issubset(names):
                 raise _ExecutionFailure(
-                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}", transform=True
+                    f"TRANSFORM_TARGET_MAPPING_INCOMPLETE_GROUP_{group_index}",
+                    transform=True,
+                    failure_metadata=_FailureMetadata(
+                        failure_phase="cpu_validation",
+                        group_index=group_index,
+                    ),
                 )
 
     def _run_forward(self, model: Any, tokenizer: Any, prompt: str, variant_id: str) -> Mapping[str, Any]:
         try:
             import torch
         except ImportError as exc:
-            raise _ExecutionFailure("PYTORCH_UNAVAILABLE") from exc
+            raise _ExecutionFailure(
+                "PYTORCH_UNAVAILABLE",
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase="forward"),
+            ) from exc
         device_info = self._resolve_device()
         device = torch.device("cuda", device_info["device_index"])
         encoded = tokenizer(
@@ -382,7 +581,7 @@ class TorchAOProfileExecutor:
         input_length = int(encoded["input_ids"].shape[-1])
         max_positions = getattr(model.config, "max_position_embeddings", None)
         if max_positions is not None and input_length + self.plan.data["decoder"]["max_new_tokens"] > max_positions:
-            raise _ExecutionFailure("PROMPT_GENERATION_OVERFLOW")
+            raise _ExecutionFailure("PROMPT_GENERATION_OVERFLOW", failure_metadata=_FailureMetadata(failure_phase="forward"))
         encoded = {key: value.to(device) for key, value in encoded.items()}
         prefix: list[dict[str, Any]] = []
         observed_groups: set[int] = set()
@@ -403,7 +602,7 @@ class TorchAOProfileExecutor:
             with torch.inference_mode():
                 outputs = model(**encoded, use_cache=True, return_dict=True)
                 if not bool(torch.isfinite(outputs.logits).all().item()):
-                    raise _ExecutionFailure("NON_FINITE_OUTPUT")
+                    raise _ExecutionFailure("NON_FINITE_OUTPUT", failure_metadata=_FailureMetadata(failure_phase="forward"))
                 generated = model.generate(
                     **encoded,
                     max_new_tokens=1024,
@@ -424,20 +623,25 @@ class TorchAOProfileExecutor:
             raise
         except RuntimeError as exc:
             reason = "OOM" if "out of memory" in str(exc).lower() else f"FORWARD_RUNTIME_ERROR:{type(exc).__name__}"
-            raise _ExecutionFailure(reason) from exc
+            raise _ExecutionFailure(
+                reason,
+                failure_metadata=_FailureMetadata.from_exception(exc, failure_phase="forward"),
+            ) from exc
         finally:
             for handle in handles:
                 handle.remove()
         if [entry["group_index"] for entry in prefix] != list(range(8)):
-            raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER")
+            raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER", failure_metadata=_FailureMetadata(failure_phase="forward"))
         token_values = generated[0].detach().cpu().tolist()
         return {
             "status": "complete",
             "transform_status": "not_applicable" if variant_id == "BF16" else "complete",
+            "cuda_transfer_status": "complete",
             "forward_status": "complete",
             "reason_code": None,
             "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
             "forward_reason_code": None,
+            "failure_metadata": _FailureMetadata().to_mapping(),
             "observed_group_prefix": prefix,
             "token_count": len(token_values),
             "output_hash": hashlib.sha256(canonical_json_bytes(token_values)).hexdigest(),
