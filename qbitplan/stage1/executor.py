@@ -17,11 +17,16 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..identity import canonical_json_bytes
-from ..plan import MODEL_IDENTIFIER, MODEL_REVISION, ExperimentPlan
-
+from ..plan import (
+    MODEL_IDENTIFIER,
+    MODEL_REVISION,
+    TOKENIZER_FILE_HASHES,
+    ExperimentPlan,
+)
 
 _MAX_FAILURE_MESSAGE_LENGTH = 512
 
@@ -131,22 +136,92 @@ class TorchAOProfileExecutor:
     def hardware_identity(self) -> Mapping[str, Any]:
         return dict(self._resolve_device())
 
-    def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
+    def prepare_variant(self, variant_id: str) -> Mapping[str, Any]:
+        """Prepare one profile before running its query batch."""
+
+        try:
+            self._model_for_variant(variant_id)
+            return {
+                "status": "complete",
+                "reason_code": "PREPARED",
+                "transform_status": (
+                    "not_applicable" if variant_id == "BF16" else "complete"
+                ),
+                "forward_status": "not_attempted",
+            }
+        except _ExecutionFailure as exc:
+            return {
+                "status": "invalid",
+                "reason_code": exc.reason_code,
+                "transform_status": (
+                    "invalid"
+                    if exc.transform
+                    else ("not_applicable" if variant_id == "BF16" else "complete")
+                ),
+                "forward_status": "not_attempted",
+            }
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
+            return {
+                "status": "invalid",
+                "reason_code": f"PREPARATION_EXCEPTION:{type(exc).__name__}",
+                "transform_status": (
+                    "not_applicable" if variant_id == "BF16" else "invalid"
+                ),
+                "forward_status": "not_attempted",
+            }
+
+    def execute_prepared(
+        self, query: Mapping[str, Any], variant_id: str
+    ) -> Mapping[str, Any]:
+        """Execute one query against a prepared profile."""
+
         try:
             model = self._model_for_variant(variant_id)
-            tokenizer = self._load_tokenizer()
-            return self._run_forward(model, tokenizer, query["prompt"], variant_id)
+            return self._run_forward(
+                model, self._load_tokenizer(), query["prompt"], variant_id
+            )
         except _ExecutionFailure as exc:
             return self._failure_observation(variant_id, exc)
-        except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
             failure = _ExecutionFailure(
                 f"FORWARD_EXCEPTION:{type(exc).__name__}",
                 failure_metadata=_FailureMetadata.from_exception(
                     exc,
-                    failure_phase="forward" if self._active_variant == variant_id else "runtime",
+                    failure_phase=(
+                        "forward"
+                        if self._active_variant == variant_id
+                        else "runtime"
+                    ),
                 ),
             )
             return self._failure_observation(variant_id, failure)
+
+    def release_variant(self, variant_id: str) -> None:
+        """Release a prepared profile and its device allocations."""
+
+        if self._active_variant == variant_id:
+            self._release_model()
+
+    def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
+        return self.execute_prepared(query, variant_id)
 
     def _failure_observation(self, variant_id: str, failure: _ExecutionFailure) -> dict[str, Any]:
         transfer_status = self._cuda_transfer_status(variant_id, failure)
@@ -308,6 +383,7 @@ class TorchAOProfileExecutor:
             use_fast=True,
             trust_remote_code=False,
         )
+        self._verify_tokenizer_files()
         if not getattr(tokenizer, "is_fast", False):
             raise _ExecutionFailure("FAST_TOKENIZER_UNAVAILABLE")
         if tokenizer.eos_token_id is None:
@@ -316,8 +392,31 @@ class TorchAOProfileExecutor:
         self._tokenizer = tokenizer
         return tokenizer
 
+    def _verify_tokenizer_files(self) -> None:
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+        try:
+            snapshot_root = snapshot_download(
+                MODEL_IDENTIFIER,
+                revision=MODEL_REVISION,
+                allow_patterns=list(TOKENIZER_FILE_HASHES),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+        for filename, expected in TOKENIZER_FILE_HASHES.items():
+            try:
+                actual = hashlib.sha256(
+                    (Path(snapshot_root) / filename).read_bytes()
+                ).hexdigest()
+            except OSError as exc:
+                raise _ExecutionFailure("TOKENIZER_FILES_UNAVAILABLE") from exc
+            if actual != expected:
+                raise _ExecutionFailure("TOKENIZER_FILE_HASH_MISMATCH")
+
     def _model_for_variant(self, variant_id: str) -> Any:
-        if variant_id not in self.plan.data["profiles"]:
+        if variant_id != "BF16" and variant_id not in self.plan.data["profiles"]:
             raise _ExecutionFailure("PROFILE_NOT_DECLARED", transform=True)
         cached_failure = self._profile_failures.get(variant_id)
         if cached_failure is not None:
@@ -633,6 +732,7 @@ class TorchAOProfileExecutor:
         if [entry["group_index"] for entry in prefix] != list(range(8)):
             raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER", failure_metadata=_FailureMetadata(failure_phase="forward"))
         token_values = generated[0].detach().cpu().tolist()
+        completion_tokens = token_values[input_length:]
         return {
             "status": "complete",
             "transform_status": "not_applicable" if variant_id == "BF16" else "complete",
@@ -643,6 +743,101 @@ class TorchAOProfileExecutor:
             "forward_reason_code": None,
             "failure_metadata": _FailureMetadata().to_mapping(),
             "observed_group_prefix": prefix,
-            "token_count": len(token_values),
-            "output_hash": hashlib.sha256(canonical_json_bytes(token_values)).hexdigest(),
+            "token_count": len(completion_tokens),
+            "generated_tokens": completion_tokens,
+            "output_text": tokenizer.decode(
+                completion_tokens, skip_special_tokens=True
+            ),
+            "output_hash": hashlib.sha256(
+                canonical_json_bytes(token_values)
+            ).hexdigest(),
         }
+
+    def teacher_forced_diagnostic(
+        self,
+        query: Mapping[str, Any],
+        variant_id: str,
+        reference_tokens: list[int],
+    ) -> Mapping[str, Any]:
+        """Compute forward KL against the BF16 teacher-forced continuation."""
+
+        try:
+            import torch
+
+            if not reference_tokens:
+                raise _ExecutionFailure("DIAGNOSTIC_EMPTY_REFERENCE")
+            tokenizer = self._load_tokenizer()
+            device_info = self._resolve_device()
+            device = torch.device("cuda", device_info["device_index"])
+            encoded = tokenizer(
+                query["prompt"],
+                add_special_tokens=True,
+                padding=False,
+                truncation=False,
+                return_tensors="pt",
+            )
+            prompt_ids = encoded["input_ids"].to(device)
+            continuation = torch.tensor(
+                [reference_tokens], dtype=prompt_ids.dtype, device=device
+            )
+            teacher_input = torch.cat((prompt_ids, continuation[:, :-1]), dim=-1)
+
+            def forward_logits(model: Any) -> Any:
+                with torch.inference_mode():
+                    result = model(
+                        input_ids=teacher_input,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                logits = result.logits.float()
+                start = prompt_ids.shape[-1] - 1
+                position_count = (
+                    1 if query["dataset"] == "MMLU-Pro" else len(reference_tokens)
+                )
+                selected = logits[:, start : start + position_count, :]
+                if selected.shape[1] != position_count:
+                    raise _ExecutionFailure("DIAGNOSTIC_LOGIT_LENGTH_MISMATCH")
+                if not bool(torch.isfinite(selected).all().item()):
+                    raise _ExecutionFailure("DIAGNOSTIC_NON_FINITE")
+                return selected
+
+            profile_model = self._model_for_variant(variant_id)
+            max_positions = getattr(profile_model.config, "max_position_embeddings", None)
+            if max_positions is not None and teacher_input.shape[-1] > max_positions:
+                raise _ExecutionFailure("DIAGNOSTIC_CONTEXT_OVERFLOW")
+            profile_logits = forward_logits(profile_model)
+            if variant_id == "BF16":
+                reference_logits = profile_logits
+            else:
+                reference_logits = forward_logits(self._model_for_variant("BF16"))
+            reference_log_probs = torch.log_softmax(reference_logits, dim=-1)
+            profile_log_probs = torch.log_softmax(profile_logits, dim=-1)
+            reference_probs = reference_log_probs.exp()
+            kl = (
+                reference_probs
+                * (reference_log_probs - profile_log_probs)
+            ).sum(dim=-1).mean()
+            if not bool(torch.isfinite(kl).item()) or float(kl.item()) < 0:
+                raise _ExecutionFailure("DIAGNOSTIC_NON_FINITE")
+            return {
+                "status": "complete",
+                "reason_code": "completed",
+                "kl_mean": float(kl.item()),
+                "evidence_class": self.evidence_class,
+            }
+        except _ExecutionFailure as exc:
+            return {"status": "invalid", "reason_code": exc.reason_code}
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
+            return {
+                "status": "invalid",
+                "reason_code": f"DIAGNOSTIC_EXCEPTION:{type(exc).__name__}",
+            }

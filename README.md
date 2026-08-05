@@ -68,3 +68,9 @@ The inventory is immutable executable-profile feasibility evidence only; it
 does not establish task quality, cost, latency, memory, systems benefit, or
 generalization.
 
+The same seam now supports the typed functional-quality runner for the pinned
+MATH and final-only MMLU-Pro orchestration. It writes paired quality outcomes,
+diagnostics, and summaries while preserving profile-major preparation and
+canonical query/profile artifact order. These artifacts are evidence records,
+not a quality claim; a research quality result requires a real directly
+measured GPU artifact.

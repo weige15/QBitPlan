@@ -67,3 +67,33 @@ lineage references to `profile-outcomes.ndjson`. Transform or complete-forward
 failure excludes only that profile and is retained as an explicit invalid
 outcome. This inventory does not produce quality, cost, latency, memory,
 systems-benefit, or generalization claims.
+
+## MMLU-Pro functional quality
+
+MMLU-Pro is final-only. Build its immutable manifest from the accepted pinned
+test parquet:
+
+```bash
+python3 scripts/build_mmlu_manifest.py \
+  --source-parquet /path/to/data/test-00000-of-00001.parquet \
+  --manifest-output data/manifests/mmlu-pro-test.json
+```
+
+Build the final-only functional-quality plan from that manifest and the
+non-final MATH profile inventory:
+
+```bash
+python3 scripts/build_mmlu_quality_plan.py \
+  --source-parquet /path/to/data/test-00000-of-00001.parquet \
+  --manifest data/manifests/mmlu-pro-test.json \
+  --profile-inventory /path/to/math-profile-inventory.json \
+  --artifact-root /path/to/artifacts \
+  --attempt-id mmlu-quality-0001 \
+  --gpu-uuid GPU-UUID \
+  --output data/manifests/mmlu-pro-quality-plan.json
+```
+
+Run it through the existing Stage-1 seam. The resulting quality records use
+the external MMLU answer targets; BF16 agreement and KL are diagnostics only.
+The repository does not claim a quality result until this command has produced
+a real directly measured GPU artifact.
