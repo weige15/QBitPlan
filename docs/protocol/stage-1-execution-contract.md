@@ -360,3 +360,25 @@ most three attempts, retrying only allowlisted preemption, I/O, or
 CUDA-context failures. Do not retry schema, provenance, non-finite-output,
 unsupported-determinism, or OOM failures by changing controls. A required
 work unit without one accepted attempt invalidates its dependent gate.
+
+## 19. Profile-major execution lifecycle
+
+The validated plan fixes the runtime schedule as profile → query: for each
+declared profile, execute every declared query in plan query order before
+transitioning to the next declared profile. The schedule never depends on
+correctness, execution outcomes, cost, or failure observations. Executor
+failure is recorded as the explicit invalid record returned by the existing
+seam; the lifecycle does not retry, substitute BF16, or select a nearby
+profile.
+
+Execution records are retained by their validated `(query_index, profile_index)`
+slot. Canonical serialization materializes `profile-outcomes.ndjson` in plan
+query order then plan profile order, and `group-boundaries.ndjson` in plan
+query order, plan profile order, then group-index order. This separates the
+profile-major lifecycle from the existing canonical artifact order.
+
+For `P` declared profiles and `Q` declared queries, the seam performs exactly
+`P*Q` executor calls, permits at most `P` successful profile preparations for
+an executor with one active profile, and retains `O(P*Q)` artifact records
+(the Stage-1 group count is fixed). This is an execution-efficiency change only;
+it is not quality, latency, memory-benefit, or serving evidence.

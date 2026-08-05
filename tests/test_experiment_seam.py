@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import qbitplan.execution as execution_module
 import qbitplan.plan as plan_module
 from qbitplan import execute_plan
 from qbitplan.plan import canonical_json_bytes
@@ -177,14 +178,28 @@ class FakeExecutor:
         self,
         failing_profile: str | None = None,
         failing_forward_profile: str | None = None,
+        raising_profile: str | None = None,
+        seed: int = 20260805,
     ) -> None:
         self.failing_profile = failing_profile
         self.failing_forward_profile = failing_forward_profile
+        self.raising_profile = raising_profile
+        self.seed = seed
+        self.call_order: list[tuple[str, str]] = []
+        self.active_profile: str | None = None
+        self.active_profile_transitions = 0
 
     def hardware_identity(self) -> dict[str, str]:
         return {"gpu_uuid": "test-gpu-uuid", "gpu_name": "test adapter"}
 
     def execute(self, query: Mapping[str, Any], variant_id: str) -> Mapping[str, Any]:
+        query_id = str(query["query_id"])
+        self.call_order.append((variant_id, query_id))
+        if self.active_profile != variant_id:
+            self.active_profile = variant_id
+            self.active_profile_transitions += 1
+        if variant_id == self.raising_profile:
+            raise RuntimeError("deterministic fake executor failure")
         if variant_id == self.failing_profile:
             return {
                 "status": "invalid",
@@ -221,8 +236,10 @@ class FakeExecutor:
                 for group_index in range(8)
             ],
             "token_count": 1,
+            "output_hash": hashlib.sha256(
+                f"{self.seed}|{query_id}|{variant_id}".encode("utf-8")
+            ).hexdigest(),
         }
-
 
 
 
@@ -234,6 +251,100 @@ def _patch_synthetic_manifest_constants(monkeypatch) -> None:
     monkeypatch.setattr(plan_module, "MATH_FINAL_COUNT", 1)
     monkeypatch.setattr(plan_module, "MATH_SOURCE_FILE_COUNT", 2)
     monkeypatch.setattr(plan_module, "MATH_SOURCE_TREE_ARTIFACT_ID", "2" * 64)
+
+
+def test_executor_call_order_is_profile_major_and_transitions_once_per_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    executor = FakeExecutor(seed=20260805)
+
+    execute_plan(plan, executor=executor)
+
+    expected_calls = [
+        (profile_id, query["query_id"])
+        for profile_id in plan["profiles"]
+        for query in plan["queries"]
+    ]
+    assert executor.call_order == expected_calls
+    assert executor.active_profile_transitions == len(plan["profiles"])
+    assert len(executor.call_order) == len(plan["profiles"]) * len(plan["queries"])
+
+
+def test_canonical_artifacts_remain_query_profile_group_ordered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    bundle = execute_plan(plan, executor=FakeExecutor(seed=20260805))
+
+    outcomes = [
+        json.loads(line)
+        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["query_id"], row["variant_id"]) for row in outcomes] == [
+        (query["query_id"], profile_id)
+        for query in plan["queries"]
+        for profile_id in plan["profiles"]
+    ]
+
+    boundaries = [
+        json.loads(line)
+        for line in (bundle.path / "group-boundaries.ndjson").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [
+        (row["query_id"], row["variant_id"], row["group_index"])
+        for row in boundaries
+    ] == [
+        (query["query_id"], profile_id, group_index)
+        for query in plan["queries"]
+        for profile_id in plan["profiles"]
+        for group_index in range(8)
+    ]
+
+
+def test_executor_exception_remains_explicit_invalid_without_retry_or_substitute(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _plan(tmp_path)
+    executor = FakeExecutor(raising_profile="11111111", seed=20260805)
+
+    bundle = execute_plan(plan, executor=executor)
+    outcomes = [
+        json.loads(line)
+        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+    ]
+    failed = [row for row in outcomes if row["variant_id"] == "11111111"]
+
+    assert len(failed) == len(plan["queries"])
+    assert all(row["status"] == "invalid" for row in failed)
+    assert all(row["reason_code"] == "EXECUTOR_EXCEPTION:RuntimeError" for row in failed)
+    assert all(row["transform_status"] == "invalid" for row in failed)
+    assert [row["variant_id"] for row in outcomes] == [
+        profile_id
+        for query in plan["queries"]
+        for profile_id in plan["profiles"]
+    ]
+    assert executor.call_order == [
+        (profile_id, query["query_id"])
+        for profile_id in plan["profiles"]
+        for query in plan["queries"]
+    ]
+
+
+def test_identical_fake_runs_have_identical_deterministic_payloads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    monkeypatch.setattr(execution_module, "_now", lambda: "2026-08-05T00:00:00Z")
+
+    first = execute_plan(_plan(tmp_path / "first"), executor=FakeExecutor(seed=20260805))
+    second = execute_plan(_plan(tmp_path / "second"), executor=FakeExecutor(seed=20260805))
+
+    for filename in ("profile-outcomes.ndjson", "group-boundaries.ndjson"):
+        assert (first.path / filename).read_bytes() == (second.path / filename).read_bytes()
 
 
 def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path, monkeypatch) -> None:

@@ -22,6 +22,25 @@ Evidentiary status: `non-evidentiary`
 | Unresolved | Does upstream context add value beyond independent scoring? | Synthetic recurrence is constructed | Paired held-out interaction test with actual prefix contexts and accepted bootstrap |
 | Unresolved | Is controller overhead amortized? | No controller, probe, feedback, transfer, or kernel measurements exist | Directly measured overhead with separate resident bytes, transfer bytes, latency, stalls, and switches |
 
+## ExperimentPlan execution lifecycle follow-up
+
+The accepted `ExperimentPlan -> ArtifactBundle` seam now schedules the
+validated plan profile-major to match the one-active-profile executor while
+retaining its canonical query-major serialized artifacts. The schedule is
+plan-fixed and does not use correctness, execution outcomes, cost, or failure
+observations. It performs `P*Q` executor calls, permits at most `P` successful
+profile preparations, and retains `O(P*Q)` artifact records for the fixed
+Stage-1 group count.
+
+This is an execution-efficiency change only. It provides no quality, latency,
+memory-benefit, or serving evidence.
+
+### Decision log addition
+
+| Status | Decision or question | Rationale | Evidence required to change it |
+|---|---|---|---|
+| Accepted for execution seam | Run each declared profile across all declared queries, then serialize by plan query/profile/group order | Reuses one active profile across its query batch without changing artifact identity or scientific ordering | A superseding execution contract or a reproducible lifecycle failure |
+
 ## Claims ledger
 
 | Claim ID | Classification | Claim | Supporting artifact | Permitted interpretation |
@@ -30,6 +49,7 @@ Evidentiary status: `non-evidentiary`
 | CP-2 | Evidence: simulated | The causal interaction implementation exactly recovers the constructed synthetic target-profile recurrence | `controller-prototype-metrics.json`, Figure 1, causal-prefix focused test | Representation and causal-plumbing check only |
 | CP-3 | Evidence: simulated | The additive independent implementation fails on most later-group synthetic target-profile decisions | Figure 1 per-group curve | Expected negative control for this fixture only |
 | CP-4 | Proposed Design | The same interfaces can consume future real target and context artifacts | typed interfaces and module contracts | Integration hypothesis, not demonstrated Stage-1 evidence |
+| EXEC-1 | Engineering behavior | The real seam uses profile-major execution with unchanged canonical serialized artifact order | `tests/test_experiment_seam.py` call-order, lifecycle, ordering, failure, and repeatability tests | Execution-efficiency behavior only; not quality, latency, memory-benefit, or serving evidence |
 
 **Claim boundary.** The fixture performs synthetic target-profile
 equality/membership only. It does not construct Stage-1 feasible sets from
