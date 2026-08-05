@@ -75,14 +75,18 @@ class TorchAOProfileExecutor:
                 "forward_status": "not_attempted",
             }
         except _ExecutionFailure as exc:
+            phase = exc.phase or "setup"
             preparation = {
                 "status": "invalid",
                 "reason_code": exc.reason_code,
-                "transform_status": "invalid" if exc.transform else "complete",
+                "transform_status": (
+                    "not_applicable"
+                    if variant_id == "BF16"
+                    else ("invalid" if exc.transform else "complete")
+                ),
                 "forward_status": "not_attempted",
             }
-            if exc.phase is not None:
-                preparation["failure_phase"] = exc.phase
+            preparation["failure_phase"] = phase
         except (
             RuntimeError,
             ValueError,
@@ -428,6 +432,9 @@ class TorchAOProfileExecutor:
         except _ExecutionFailure as exc:
             if exc.phase is None:
                 exc.phase = str(details.get("active_phase", "setup"))
+            details["phase_status"] = "failed"
+            details["failure_phase"] = exc.phase
+            details.pop("active_phase", None)
             self._profile_failures[variant_id] = (
                 exc.reason_code,
                 exc.transform,
@@ -437,6 +444,9 @@ class TorchAOProfileExecutor:
             raise
         except RuntimeError as exc:
             phase = str(details.get("active_phase", "setup"))
+            details["phase_status"] = "failed"
+            details["failure_phase"] = phase
+            details.pop("active_phase", None)
             reason = (
                 "OOM"
                 if "out of memory" in str(exc).lower()
@@ -456,6 +466,9 @@ class TorchAOProfileExecutor:
             raise failure from None
         except OSError:
             phase = str(details.get("active_phase", "model_load"))
+            details["phase_status"] = "failed"
+            details["failure_phase"] = phase
+            details.pop("active_phase", None)
             failure = _ExecutionFailure(
                 "MODEL_LOAD_FAILED",
                 transform=variant_id != "BF16",

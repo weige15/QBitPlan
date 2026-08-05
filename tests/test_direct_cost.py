@@ -16,6 +16,7 @@ from qbitplan.stage1.direct_cost import (
     DirectCostRunner,
     MemoryProbeOperationError,
 )
+from qbitplan.stage1.executor import TorchAOProfileExecutor
 
 DIMENSIONS = (
     "resident_accelerator_bytes",
@@ -305,6 +306,63 @@ def test_cuda_trace_probe_extracts_annotated_copy_and_group_transitions(
     }
 
 
+def test_cuda_trace_probe_omits_malformed_group_timestamps_without_attribute_error(
+    monkeypatch,
+) -> None:
+    class BrokenEvent:
+        name = "qbitplan.group.0.0"
+        cpu_time_total = 10.0
+        device_time_total = 1.0
+        device_memory_usage = 0
+
+        @property
+        def time_range(self) -> Any:
+            raise AttributeError("profiler interval unavailable")
+
+    class ReversedEvent:
+        name = "qbitplan.group.1.1"
+        cpu_time_total = 10.0
+        device_time_total = 1.0
+        device_memory_usage = 0
+        time_range = SimpleNamespace(start=20.0, end=10.0)
+
+    class FakeProfiler:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def step(self) -> None:
+            return None
+
+        def events(self) -> list[Any]:
+            return [BrokenEvent(), ReversedEvent()]
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            synchronize=lambda: None,
+        ),
+        profiler=SimpleNamespace(
+            ProfilerActivity=SimpleNamespace(CPU="cpu", CUDA="cuda"),
+            profile=lambda **_: FakeProfiler(),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    result, trace = CudaTraceProbe().trace(lambda: {"status": "complete"})
+
+    assert result == {"status": "complete"}
+    assert trace["status"] == "complete"
+    assert "CUDA_TRACE_FAILED:AttributeError" not in str(trace)
+    assert trace["dimension_coverage"]["kernel_switch_count"] == {
+        "status": "omitted/unavailable",
+        "reason": "TRACE_GROUP_TIMESTAMP_UNAVAILABLE",
+        "evidence_class": "analytical",
+    }
+
+
 def test_direct_cost_omits_uncovered_dimensions_without_zero_or_lookup_fallback(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -582,6 +640,40 @@ def test_direct_cost_bf16_oom_is_recorded_without_profile_substitution(
         "11111111",
         "01010101",
     }
+
+
+def test_real_executor_bf16_oom_reports_failed_setup_without_quantization(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    from qbitplan.plan import ExperimentPlan
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(*_: Any, **__: Any) -> Any:
+            raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoModelForCausalLM=FakeAutoModel),
+    )
+
+    class TestExecutor(TorchAOProfileExecutor):
+        def _resolve_device(self) -> dict[str, Any]:
+            return {"device_index": 0}
+
+    executor = TestExecutor(ExperimentPlan.from_mapping(_direct_cost_plan(tmp_path)))
+    preparation = executor.prepare_variant("BF16")
+
+    assert preparation["status"] == "invalid"
+    assert preparation["reason_code"] == "OOM"
+    assert preparation["transform_status"] == "not_applicable"
+    assert preparation["forward_status"] == "not_attempted"
+    assert preparation["failure_phase"] == "model_load"
+    assert preparation["preparation_phases"]["phase_status"] == "failed"
+    assert preparation["preparation_phases"]["failure_phase"] == "model_load"
+    assert "active_phase" not in preparation["preparation_phases"]
 
 
 def test_direct_cost_plan_and_cli_require_real_path_without_fake_selector(

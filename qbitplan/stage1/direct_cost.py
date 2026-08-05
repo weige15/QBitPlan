@@ -295,6 +295,7 @@ class CudaTraceProbe:
             timestamped_group_events = all(
                 _valid_number(event.get("start_time_us"))
                 and _valid_number(event.get("end_time_us"))
+                and event["end_time_us"] > event["start_time_us"]
                 for event in group_events
             )
             kernel_switch_count: int | None = None
