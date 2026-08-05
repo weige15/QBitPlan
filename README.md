@@ -74,3 +74,13 @@ diagnostics, and summaries while preserving profile-major preparation and
 canonical query/profile artifact order. These artifacts are evidence records,
 not a quality claim; a research quality result requires a real directly
 measured GPU artifact.
+
+The historical all-profile attempt from issue #32 recorded an empty `P_exec`
+after OOM-class exclusions; it is not the current state wording for the
+repository. A newer CPU-first smoke run completed BF16, all-4, all-8, and one
+mixed profile for the two permitted non-final MATH queries and directly
+measured absolute NVML resident bytes. Smoke evidence remains
+non-evidentiary and does not establish the full 256-profile `P_exec`.
+
+The local-only progress report and separated figure are in
+[docs/progress/stage1-progress-20260805.md](docs/progress/stage1-progress-20260805.md).

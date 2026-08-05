@@ -18,10 +18,19 @@ query-only direct profile scoring, an additive independent per-group baseline,
 and an interaction-aware sequential planner that may use only the actually
 executed prefix and its causal hidden-state summary.
 
-**Evidence.** The directly executed profile inventory recorded in issue #32
-currently has an empty `P_exec` because every canonical profile was excluded by
-an OOM-class failure. Consequently, no real profile target set exists yet from
-which to fit or evaluate a Stage-1 controller.
+**Evidence.** The historical all-profile inventory from issue #32 recorded an
+empty `P_exec` after OOM-class exclusions (run
+`c044b28a8296cf96aaa2c2642b96efd557ceec6df59dafe35b30a95361f6e285`, producer
+SHA `b1f0462053af8a21a6015b977ed05104983a3e84`). That is the old pre-CPU-first
+attempt, not the current state wording for the repository.
+
+**Evidence.** A newer CPU-first four-profile smoke run completed BF16, all-4,
+all-8, and mixed executable paths for both permitted smoke queries (run
+`f7d1e51c2819a2f7e36fa9ae3782f6897b6153da3669a83dadc9e05a26bb3147`, producer
+SHA `d16ffb4eddc0b622cf8075e0116e4ddbaffb409f`). Smoke completion is
+non-evidentiary executable-path evidence; it does not establish the full
+256-profile `P_exec` or real profile target sets. The current full CPU-first
+inventory attempt is documented separately and remains incomplete.
 
 **Evidence.** This prototype therefore runs only on a deterministic synthetic
 fixture with 2,048 training queries, 1,024 validation queries, eight binary
