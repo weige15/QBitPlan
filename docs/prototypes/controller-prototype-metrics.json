@@ -1,0 +1,105 @@
+{
+  "bootstrap_seeds": {
+    "direct_minus_static": 20260804,
+    "interaction_minus_independent": 20260805
+  },
+  "claim_boundary": "Deterministic synthetic engineering fixture only. This is not a Stage-1 signal, interaction, oracle, quality, cost, memory, latency, or serving result.",
+  "dataset_seed": 20260805,
+  "embedding_dim": 8,
+  "evidence_class": "simulated",
+  "executable_profiles": 256,
+  "methods": {
+    "direct": {
+      "feasible_profile_hit_rate": 0.712890625,
+      "mean_selected_bit_width": 5.982421875,
+      "per_group_bit_accuracy": [
+        0.9794921875,
+        0.947265625,
+        0.91015625,
+        0.873046875,
+        0.837890625,
+        0.8037109375,
+        0.7666015625,
+        0.7275390625
+      ]
+    },
+    "independent": {
+      "feasible_profile_hit_rate": 0.0126953125,
+      "mean_selected_bit_width": 6.0009765625,
+      "per_group_bit_accuracy": [
+        1.0,
+        0.501953125,
+        0.5068359375,
+        0.5068359375,
+        0.4853515625,
+        0.48828125,
+        0.5087890625,
+        0.498046875
+      ]
+    },
+    "interaction": {
+      "feasible_profile_hit_rate": 1.0,
+      "mean_selected_bit_width": 6.0,
+      "per_group_bit_accuracy": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "static": {
+      "feasible_profile_hit_rate": 0.00390625,
+      "mean_selected_bit_width": 4.0,
+      "per_group_bit_accuracy": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ]
+    }
+  },
+  "num_groups": 8,
+  "paired_comparisons": {
+    "direct_minus_static": {
+      "lower_95": 0.6806640625,
+      "point_estimate": 0.708984375,
+      "replicates": 10000,
+      "seed": 20260804,
+      "upper_95": 0.736328125
+    },
+    "interaction_minus_independent": {
+      "lower_95": 0.98046875,
+      "point_estimate": 0.9873046875,
+      "replicates": 10000,
+      "seed": 20260805,
+      "upper_95": 0.994140625
+    }
+  },
+  "schema_version": "qbitplan.controller-prototype.v1",
+  "static_profile_id": "00000000",
+  "structural_dim": 7,
+  "training_mse": {
+    "direct": 0.0037559240603752706,
+    "independent": 0.21808129681933783,
+    "interaction_by_group": [
+      3.5603478356026447e-29,
+      3.551763210693496e-29,
+      2.0393353095418445e-29,
+      3.9658507404045013e-29,
+      3.0791169107021044e-29,
+      4.116928260127833e-29,
+      2.8061289047688353e-29,
+      4.2164738613486866e-29
+    ]
+  },
+  "training_queries": 2048,
+  "validation_queries": 1024
+}
