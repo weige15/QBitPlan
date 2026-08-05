@@ -17,10 +17,6 @@ from ._controller_common import (
     profile_from_id,
     profile_id,
 )
-from ._controller_stats import (
-    PairedBootstrapResult,
-    paired_bootstrap_difference,
-)
 from ._controller_interaction import (
     BitDecision,
     CausalInteractionPlanner,
@@ -30,6 +26,14 @@ from ._controller_query import (
     DirectProfileScorer,
     IndependentGroupScorer,
     select_pareto_static_profile,
+)
+from ._controller_stats import (
+    PairedBootstrapResult,
+    paired_bootstrap_difference,
+)
+from .controller_artifacts import (
+    Stage1ControllerArtifactAdapter,
+    Stage1ProfileArtifact,
 )
 
 __all__ = [
@@ -43,6 +47,8 @@ __all__ = [
     "PrefixContextProvider",
     "Profile",
     "QueryFeatures",
+    "Stage1ControllerArtifactAdapter",
+    "Stage1ProfileArtifact",
     "StructuralNormalizer",
     "TrainingQuery",
     "enumerate_profiles",
