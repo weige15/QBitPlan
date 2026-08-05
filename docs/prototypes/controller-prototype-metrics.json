@@ -111,7 +111,7 @@
       "query_manifest_filename": "query-manifest.json",
       "raw_artifact_location": ".",
       "seed": 20260805,
-      "source_git_sha": "e465e23c52b21b72213807598f5be5c0e28fd7a8"
+      "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
     },
     "dataset": {
       "identifier": "qbitplan.synthetic-controller-dataset",
@@ -145,7 +145,7 @@
       "numpy_version": "2.1.0",
       "python_version": "3.12.3"
     },
-    "source_git_sha": "e465e23c52b21b72213807598f5be5c0e28fd7a8"
+    "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
   },
   "random_seeds": {
     "bootstrap": {
@@ -184,7 +184,7 @@
     "query_manifest_filename": "query-manifest.json",
     "raw_artifact_location": ".",
     "seed": 20260805,
-    "source_git_sha": "e465e23c52b21b72213807598f5be5c0e28fd7a8"
+    "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
   },
   "schema_version": "qbitplan.controller-prototype.v2",
   "static_profile_id": "00000000",
