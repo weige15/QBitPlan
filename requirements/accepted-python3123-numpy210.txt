@@ -1,0 +1,3 @@
+# Accepted controller-prototype artifact-generation environment
+# Python 3.12.3
+numpy==2.1.0

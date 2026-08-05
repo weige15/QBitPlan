@@ -1,0 +1,208 @@
+{
+  "claim_boundary": "Deterministic synthetic engineering fixture only. This is not a Stage-1 signal, interaction, oracle, quality, cost, memory, latency, or serving result. Synthetic target-profile equality/membership is not Stage-1 feasible-set membership plus external task correctness.",
+  "embedding_dim": 8,
+  "evidence_class": "simulated",
+  "evidentiary_status": "non-evidentiary",
+  "executable_profiles": 256,
+  "methods": {
+    "direct": {
+      "mean_selected_bit_width": 5.982421875,
+      "per_group_bit_accuracy": [
+        0.9794921875,
+        0.947265625,
+        0.91015625,
+        0.873046875,
+        0.837890625,
+        0.8037109375,
+        0.7666015625,
+        0.7275390625
+      ],
+      "synthetic_target_profile_match_rate": 0.712890625
+    },
+    "independent": {
+      "mean_selected_bit_width": 6.0009765625,
+      "per_group_bit_accuracy": [
+        1.0,
+        0.501953125,
+        0.5068359375,
+        0.5068359375,
+        0.4853515625,
+        0.48828125,
+        0.5087890625,
+        0.498046875
+      ],
+      "synthetic_target_profile_match_rate": 0.0126953125
+    },
+    "interaction": {
+      "mean_selected_bit_width": 6.0,
+      "per_group_bit_accuracy": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "synthetic_target_profile_match_rate": 1.0
+    },
+    "static": {
+      "mean_selected_bit_width": 4.0,
+      "per_group_bit_accuracy": [
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "synthetic_target_profile_match_rate": 0.00390625
+    }
+  },
+  "num_groups": 8,
+  "paired_comparisons": {
+    "direct_minus_static": {
+      "lower_95": 0.6806640625,
+      "point_estimate": 0.708984375,
+      "replicates": 10000,
+      "seed": 20260804,
+      "upper_95": 0.736328125
+    },
+    "interaction_minus_independent": {
+      "lower_95": 0.98046875,
+      "point_estimate": 0.9873046875,
+      "replicates": 10000,
+      "seed": 20260805,
+      "upper_95": 0.994140625
+    }
+  },
+  "provenance": {
+    "backend_mode": "numpy-ols/synthetic-fixture-only",
+    "configuration": {
+      "backend_mode": "numpy-ols/synthetic-fixture-only",
+      "bootstrap_seeds": {
+        "direct_minus_static": 20260804,
+        "interaction_minus_independent": 20260805
+      },
+      "claim_boundary": "Deterministic synthetic engineering fixture only. This is not a Stage-1 signal, interaction, oracle, quality, cost, memory, latency, or serving result. Synthetic target-profile equality/membership is not Stage-1 feasible-set membership plus external task correctness.",
+      "evidence_class": "simulated",
+      "evidentiary_status": "non-evidentiary",
+      "fixture": {
+        "dataset_identifier": "qbitplan.synthetic-controller-dataset",
+        "dataset_revision": "sign-patterns-v1",
+        "embedding_dim": 8,
+        "model_identifier": "qbitplan.synthetic-controller-model",
+        "model_revision": "target-profile-recurrence-v1",
+        "num_groups": 8,
+        "profile_bits": [
+          4,
+          8
+        ],
+        "target_definition": "One constructed synthetic target profile per query; matching is exact profile equality/membership.",
+        "train_repeats": 8,
+        "validation_repeats": 4
+      },
+      "metrics_schema_version": "qbitplan.controller-prototype.v2",
+      "prediction_schema_version": "qbitplan.controller-prototype.prediction.v2",
+      "quantization_mode": "not-executed/synthetic-profile-labels-only",
+      "query_manifest_filename": "query-manifest.json",
+      "raw_artifact_location": ".",
+      "seed": 20260805,
+      "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
+    },
+    "dataset": {
+      "identifier": "qbitplan.synthetic-controller-dataset",
+      "revision": "sign-patterns-v1"
+    },
+    "hardware": {
+      "accelerator": "unavailable",
+      "device_name": "unavailable",
+      "device_uuid": "unavailable",
+      "driver_version": "unavailable",
+      "identity_status": "unavailable"
+    },
+    "model": {
+      "identifier": "qbitplan.synthetic-controller-model",
+      "revision": "target-profile-recurrence-v1"
+    },
+    "quantization_mode": "not-executed/synthetic-profile-labels-only",
+    "query_id_manifest": {
+      "path": "query-manifest.json",
+      "sha256": "cc1dc7e764dac4d97a2865773d55dd1e1960f59d82b02429d45d861d76e5376e"
+    },
+    "random_seeds": {
+      "bootstrap": {
+        "direct_minus_static": 20260804,
+        "interaction_minus_independent": 20260805
+      },
+      "dataset": 20260805
+    },
+    "raw_artifact_location": ".",
+    "software": {
+      "numpy_version": "2.1.0",
+      "python_version": "3.12.3"
+    },
+    "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
+  },
+  "random_seeds": {
+    "bootstrap": {
+      "direct_minus_static": 20260804,
+      "interaction_minus_independent": 20260805
+    },
+    "dataset": 20260805
+  },
+  "run_configuration": {
+    "backend_mode": "numpy-ols/synthetic-fixture-only",
+    "bootstrap_seeds": {
+      "direct_minus_static": 20260804,
+      "interaction_minus_independent": 20260805
+    },
+    "claim_boundary": "Deterministic synthetic engineering fixture only. This is not a Stage-1 signal, interaction, oracle, quality, cost, memory, latency, or serving result. Synthetic target-profile equality/membership is not Stage-1 feasible-set membership plus external task correctness.",
+    "evidence_class": "simulated",
+    "evidentiary_status": "non-evidentiary",
+    "fixture": {
+      "dataset_identifier": "qbitplan.synthetic-controller-dataset",
+      "dataset_revision": "sign-patterns-v1",
+      "embedding_dim": 8,
+      "model_identifier": "qbitplan.synthetic-controller-model",
+      "model_revision": "target-profile-recurrence-v1",
+      "num_groups": 8,
+      "profile_bits": [
+        4,
+        8
+      ],
+      "target_definition": "One constructed synthetic target profile per query; matching is exact profile equality/membership.",
+      "train_repeats": 8,
+      "validation_repeats": 4
+    },
+    "metrics_schema_version": "qbitplan.controller-prototype.v2",
+    "prediction_schema_version": "qbitplan.controller-prototype.prediction.v2",
+    "quantization_mode": "not-executed/synthetic-profile-labels-only",
+    "query_manifest_filename": "query-manifest.json",
+    "raw_artifact_location": ".",
+    "seed": 20260805,
+    "source_git_sha": "96a507f7152b1675603ba801c57b05d08fea5326"
+  },
+  "schema_version": "qbitplan.controller-prototype.v2",
+  "static_profile_id": "00000000",
+  "structural_dim": 7,
+  "training_mse": {
+    "direct": 0.0037559240603752693,
+    "independent": 0.2180812968193378,
+    "interaction_by_group": [
+      3.5603478356026447e-29,
+      3.551763210693496e-29,
+      2.0393353095418445e-29,
+      3.9658507404045013e-29,
+      3.0791169107021044e-29,
+      4.116928260127833e-29,
+      2.8061289047688353e-29,
+      4.2164738613486866e-29
+    ]
+  },
+  "training_queries": 2048,
+  "validation_queries": 1024
+}
