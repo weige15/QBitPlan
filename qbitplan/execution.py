@@ -36,6 +36,26 @@ class ArtifactBundle:
     files: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class _ExecutionRecord:
+    """One plan-indexed executor observation retained before serialization."""
+
+    query_index: int
+    profile_index: int
+    phase: str
+    query_id: str
+    variant_id: str
+    observation: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _CanonicalExecutionRecords:
+    """Canonical query-major payloads derived from plan-indexed records."""
+
+    outcomes: tuple[Mapping[str, Any], ...]
+    boundaries: tuple[Mapping[str, Any], ...]
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -234,6 +254,125 @@ def _profile_bits(variant_id: str) -> str:
     return "BF16" if variant_id == "BF16" else variant_id
 
 
+def _execute_record(
+    *,
+    executor: ProfileExecutor,
+    query_index: int,
+    profile_index: int,
+    query: Mapping[str, Any],
+    variant_id: str,
+) -> _ExecutionRecord:
+    """Execute one fixed plan slot without retrying or selecting a substitute."""
+
+    try:
+        observation = _observation_fields(executor.execute(query, variant_id))
+    except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
+        observation = _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
+    return _ExecutionRecord(
+        query_index=query_index,
+        profile_index=profile_index,
+        phase=str(query["phase"]),
+        query_id=str(query["query_id"]),
+        variant_id=variant_id,
+        observation=observation,
+    )
+
+
+def _serialize_canonical_records(
+    *,
+    records: Mapping[tuple[int, int], _ExecutionRecord],
+    queries: Sequence[Mapping[str, Any]],
+    profile_ids: Sequence[str],
+    producer_git_sha: str,
+    source_manifest_id: str,
+    source_artifact_id: str,
+    configuration_hash: str,
+    created_at: str,
+    evidence_class: str,
+) -> _CanonicalExecutionRecords:
+    """Serialize records in validated plan query/profile/group order."""
+
+    expected_keys = {
+        (query_index, profile_index)
+        for query_index in range(len(queries))
+        for profile_index in range(len(profile_ids))
+    }
+    if set(records) != expected_keys:
+        raise ValueError("execution records do not account for every plan query/profile pair")
+
+    outcomes: list[dict[str, Any]] = []
+    boundaries: list[dict[str, Any]] = []
+    for query_index, query in enumerate(queries):
+        for profile_index, variant_id in enumerate(profile_ids):
+            record = records[(query_index, profile_index)]
+            if (
+                record.query_index != query_index
+                or record.profile_index != profile_index
+                or record.query_id != query["query_id"]
+                or record.variant_id != variant_id
+            ):
+                raise ValueError("execution record does not match its validated plan slot")
+            observation = record.observation
+            outcome = {
+                **_lineage(
+                    artifact_type="profile-outcome",
+                    schema_version="qbitplan.stage1.profile-outcome.v1",
+                    producer_git_sha=producer_git_sha,
+                    source_manifest_id=source_manifest_id,
+                    source_artifact_id=source_artifact_id,
+                    configuration_hash=configuration_hash,
+                    record_count=1,
+                    created_at=created_at,
+                    evidence_class=evidence_class,
+                ),
+                "phase": record.phase,
+                "query_id": record.query_id,
+                "variant_id": record.variant_id,
+                "profile_bits": _profile_bits(record.variant_id),
+                "status": observation["status"],
+                "transform_status": observation["transform_status"],
+                "cuda_transfer_status": observation["cuda_transfer_status"],
+                "terminal_status": observation["status"],
+                "executable": observation["status"] == "complete"
+                and observation["forward_status"] == "complete"
+                and observation["transform_status"] in {"complete", "not_applicable"},
+                "forward_status": observation["forward_status"],
+                "reason_code": observation["reason_code"],
+                "transform_reason_code": observation["transform_reason_code"],
+                "forward_reason_code": observation["forward_reason_code"],
+                "failure_metadata": observation["failure_metadata"],
+            }
+            for field in ("token_count", "output_hash"):
+                if field in observation:
+                    outcome[field] = observation[field]
+            outcomes.append(outcome)
+            for boundary in sorted(
+                observation["observed_group_prefix"],
+                key=lambda item: item["group_index"],
+            ):
+                boundaries.append(
+                    {
+                        **_lineage(
+                            artifact_type="group-boundary",
+                            schema_version="qbitplan.stage1.group-boundary.v1",
+                            producer_git_sha=producer_git_sha,
+                            source_manifest_id=source_manifest_id,
+                            source_artifact_id=source_artifact_id,
+                            configuration_hash=configuration_hash,
+                            record_count=1,
+                            created_at=created_at,
+                            evidence_class=evidence_class,
+                        ),
+                        "phase": record.phase,
+                        "query_id": record.query_id,
+                        "variant_id": record.variant_id,
+                        "group_index": boundary["group_index"],
+                        "prefix_bits": boundary["prefix_bits"],
+                    }
+                )
+    return _CanonicalExecutionRecords(tuple(outcomes), tuple(boundaries))
+
+
 def _build_profile_inventory(
     *,
     profile_ids: list[str],
@@ -385,69 +524,33 @@ def execute_plan(
             "identity_reason_code": f"HARDWARE_IDENTITY_EXCEPTION:{type(exc).__name__}",
         }
 
-    outcomes: list[dict[str, Any]] = []
-    boundaries: list[dict[str, Any]] = []
     queries = experiment_plan.data["queries"]
-    for query in queries:
-        for variant_id in experiment_plan.data["profiles"]:
-            try:
-                observation = _observation_fields(executor.execute(query, variant_id))
-            except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
-                observation = _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
-            outcome = {
-                **_lineage(
-                    artifact_type="profile-outcome",
-                    schema_version="qbitplan.stage1.profile-outcome.v1",
-                    producer_git_sha=producer_git_sha,
-                    source_manifest_id=experiment_plan.source_manifest_id,
-                    source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
-                    configuration_hash=configuration_hash,
-                    record_count=1,
-                    created_at=created_at,
-                    evidence_class=evidence_class,
-                ),
-                "phase": query["phase"],
-                "query_id": query["query_id"],
-                "variant_id": variant_id,
-                "profile_bits": _profile_bits(variant_id),
-                "status": observation["status"],
-                "transform_status": observation["transform_status"],
-                "cuda_transfer_status": observation["cuda_transfer_status"],
-                "terminal_status": observation["status"],
-                "executable": observation["status"] == "complete"
-                and observation["forward_status"] == "complete"
-                and observation["transform_status"] in {"complete", "not_applicable"},
-                "forward_status": observation["forward_status"],
-                "reason_code": observation["reason_code"],
-                "transform_reason_code": observation["transform_reason_code"],
-                "forward_reason_code": observation["forward_reason_code"],
-                "failure_metadata": observation["failure_metadata"],
-            }
-            for field in ("token_count", "output_hash"):
-                if field in observation:
-                    outcome[field] = observation[field]
-            outcomes.append(outcome)
-            for boundary in observation["observed_group_prefix"]:
-                boundaries.append(
-                    {
-                        **_lineage(
-                            artifact_type="group-boundary",
-                            schema_version="qbitplan.stage1.group-boundary.v1",
-                            producer_git_sha=producer_git_sha,
-                            source_manifest_id=experiment_plan.source_manifest_id,
-                            source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
-                            configuration_hash=configuration_hash,
-                            record_count=1,
-                            created_at=created_at,
-                            evidence_class=evidence_class,
-                        ),
-                        "phase": query["phase"],
-                        "query_id": query["query_id"],
-                        "variant_id": variant_id,
-                        "group_index": boundary["group_index"],
-                        "prefix_bits": boundary["prefix_bits"],
-                    }
-                )
+    profile_ids = experiment_plan.data["profiles"]
+    execution_records: dict[tuple[int, int], _ExecutionRecord] = {}
+    for profile_index, variant_id in enumerate(profile_ids):
+        for query_index, query in enumerate(queries):
+            record = _execute_record(
+                executor=executor,
+                query_index=query_index,
+                profile_index=profile_index,
+                query=query,
+                variant_id=variant_id,
+            )
+            execution_records[(query_index, profile_index)] = record
+
+    canonical_records = _serialize_canonical_records(
+        records=execution_records,
+        queries=queries,
+        profile_ids=profile_ids,
+        producer_git_sha=producer_git_sha,
+        source_manifest_id=experiment_plan.source_manifest_id,
+        source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
+        configuration_hash=configuration_hash,
+        created_at=created_at,
+        evidence_class=evidence_class,
+    )
+    outcomes = list(canonical_records.outcomes)
+    boundaries = list(canonical_records.boundaries)
 
     profile_inventory = None
     if experiment_plan.data["mode"] == "functional-quality":
