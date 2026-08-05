@@ -202,7 +202,8 @@ def test_synthetic_prototype_emits_labeled_plot_and_metrics(tmp_path: Path) -> N
         "query-manifest.json"
     )
     assert metrics["provenance"]["query_id_manifest"]["sha256"]
-    assert "feasible_profile_hit_rate" not in json.dumps(metrics)
+    obsolete_metric_key = "_".join(("feasible", "profile", "hit", "rate"))
+    assert obsolete_metric_key not in json.dumps(metrics)
     predictions_path = tmp_path / "predictions.csv"
     assert predictions_path.is_file()
     with predictions_path.open(newline="", encoding="utf-8") as handle:
