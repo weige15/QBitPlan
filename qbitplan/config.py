@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .plan import EXPECTED_DECODER, EXPECTED_DETERMINISM, EXPECTED_RUNTIME, EXPECTED_SOFTWARE
+from .plan import (
+    EXPECTED_DECODER,
+    EXPECTED_DETERMINISM,
+    EXPECTED_RUNTIME,
+    EXPECTED_SOFTWARE,
+    TOKENIZER_FILE_HASHES,
+)
 
 
 def accepted_smoke_configuration(
@@ -29,6 +35,7 @@ def accepted_smoke_configuration(
             "revision": "d04e592bb4f6aa9cfee91e2e20afa771667e1d4b",
             "use_fast": True,
             "trust_remote_code": False,
+            "file_hashes": dict(TOKENIZER_FILE_HASHES),
         },
         "software": dict(EXPECTED_SOFTWARE),
         "decoder": dict(EXPECTED_DECODER),

@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from .identity import canonical_json_bytes, sha256_bytes, sha256_canonical
 from .plan import ExperimentPlan
@@ -170,13 +170,16 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
         if field == "exception_message" and value is not None and len(value) > 512:
             raise ValueError("executor failure exception message exceeds its bound")
     observation["failure_metadata"] = dict(metadata)
-    if observation["status"] not in {"complete", "invalid"}:
+    if observation["status"] not in {"complete", "invalid", "incomplete", "aborted"}:
         raise ValueError("executor observation has an unsupported terminal status")
     if observation["transform_status"] not in {"complete", "invalid", "not_applicable"}:
         raise ValueError("executor observation has an unsupported transform status")
     if observation["forward_status"] not in {"complete", "invalid", "not_attempted"}:
         raise ValueError("executor observation has an unsupported forward status")
-    if observation["status"] == "invalid" and (not isinstance(observation["reason_code"], str) or not observation["reason_code"]):
+    if observation["status"] in {"invalid", "incomplete", "aborted"} and (
+        not isinstance(observation["reason_code"], str)
+        or not observation["reason_code"]
+    ):
         raise ValueError("executor observation requires a non-empty reason code")
     prefix = observation["observed_group_prefix"]
     if not isinstance(prefix, list):
@@ -195,7 +198,7 @@ def _observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("complete observation has an incomplete forward")
         if [entry["group_index"] for entry in prefix] != list(range(8)):
             raise ValueError("complete observation has an incomplete group order")
-    elif observation["forward_status"] == "complete":
+    elif observation["status"] == "invalid" and observation["forward_status"] == "complete":
         raise ValueError("invalid observation has a complete forward")
     return dict(observation)
 
@@ -289,6 +292,7 @@ def _serialize_canonical_records(
     configuration_hash: str,
     created_at: str,
     evidence_class: str,
+    additional_source_artifact_ids: list[str] | None = None,
 ) -> _CanonicalExecutionRecords:
     """Serialize records in validated plan query/profile/group order."""
 
@@ -324,6 +328,7 @@ def _serialize_canonical_records(
                     record_count=1,
                     created_at=created_at,
                     evidence_class=evidence_class,
+                    additional_source_artifact_ids=additional_source_artifact_ids,
                 ),
                 "phase": record.phase,
                 "query_id": record.query_id,
@@ -362,6 +367,7 @@ def _serialize_canonical_records(
                             record_count=1,
                             created_at=created_at,
                             evidence_class=evidence_class,
+                            additional_source_artifact_ids=additional_source_artifact_ids,
                         ),
                         "phase": record.phase,
                         "query_id": record.query_id,
@@ -413,7 +419,7 @@ def _build_profile_inventory(
                 {"profile_id": profile_id, "executable": False, "exclusion_reason_code": reason}
             )
             continue
-        if any(
+        if records and all(
             outcome["status"] == "complete"
             and outcome["forward_status"] == "complete"
             and outcome["transform_status"] in {"complete", "not_applicable"}
@@ -526,17 +532,158 @@ def execute_plan(
 
     queries = experiment_plan.data["queries"]
     profile_ids = experiment_plan.data["profiles"]
+    lineage_additional_source_artifact_ids = (
+        [experiment_plan.data["profile_inventory"]["artifact_id"]]
+        if experiment_plan.data["source_manifest"]["dataset"] == "MMLU-Pro"
+        else []
+    )
     execution_records: dict[tuple[int, int], _ExecutionRecord] = {}
-    for profile_index, variant_id in enumerate(profile_ids):
+    observations_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _normalize_observation(value: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return _observation_fields(value)
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            MemoryError,
+        ) as exc:
+            return _invalid_observation(f"EXECUTOR_EXCEPTION:{type(exc).__name__}")
+
+    def _record_observation(
+        *,
+        query_index: int,
+        profile_index: int,
+        query: Mapping[str, Any],
+        variant_id: str,
+        observation: Mapping[str, Any],
+    ) -> None:
+        normalized = dict(observation)
+        observations_cache[(str(query["query_id"]), variant_id)] = normalized
+        execution_records[(query_index, profile_index)] = _ExecutionRecord(
+            query_index=query_index,
+            profile_index=profile_index,
+            phase=str(query["phase"]),
+            query_id=str(query["query_id"]),
+            variant_id=variant_id,
+            observation=normalized,
+        )
+
+    def _execute_variant(profile_index: int, variant_id: str) -> None:
+        prepare = getattr(executor, "prepare_variant", None)
+        execute_prepared = getattr(executor, "execute_prepared", None)
+        release = getattr(executor, "release_variant", None)
+        if callable(prepare) and callable(execute_prepared) and callable(release):
+            release_error: BaseException | None = None
+            try:
+                try:
+                    preparation = prepare(variant_id)
+                except (
+                    RuntimeError,
+                    ValueError,
+                    OSError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    AttributeError,
+                    MemoryError,
+                ) as exc:
+                    preparation = _invalid_observation(
+                        f"PREPARATION_EXCEPTION:{type(exc).__name__}"
+                    )
+                if not isinstance(preparation, Mapping):
+                    preparation = _invalid_observation("INVALID_PREPARATION_RECORD")
+                if preparation.get("status") != "complete":
+                    reason = str(
+                        preparation.get("reason_code", "PROFILE_PREPARATION_FAILED")
+                    )
+                    for query_index, query in enumerate(queries):
+                        _record_observation(
+                            query_index=query_index,
+                            profile_index=profile_index,
+                            query=query,
+                            variant_id=variant_id,
+                            observation=_invalid_observation(reason),
+                        )
+                    return
+                for query_index, query in enumerate(queries):
+                    try:
+                        observation = execute_prepared(query, variant_id)
+                    except (
+                        RuntimeError,
+                        ValueError,
+                        OSError,
+                        TypeError,
+                        KeyError,
+                        IndexError,
+                        AttributeError,
+                        MemoryError,
+                    ) as exc:
+                        observation = _invalid_observation(
+                            f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
+                        )
+                    if not isinstance(observation, Mapping):
+                        observation = _invalid_observation("INVALID_EXECUTOR_RECORD")
+                    _record_observation(
+                        query_index=query_index,
+                        profile_index=profile_index,
+                        query=query,
+                        variant_id=variant_id,
+                        observation=_normalize_observation(observation),
+                    )
+            finally:
+                try:
+                    release(variant_id)
+                except (
+                    RuntimeError,
+                    ValueError,
+                    OSError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    AttributeError,
+                    MemoryError,
+                ) as exc:
+                    release_error = exc
+            if release_error is not None:
+                raise RuntimeError(
+                    f"PROFILE_RELEASE_EXCEPTION:{type(release_error).__name__}"
+                ) from release_error
+            return
+
         for query_index, query in enumerate(queries):
-            record = _execute_record(
-                executor=executor,
+            try:
+                observation = executor.execute(query, variant_id)
+            except (
+                RuntimeError,
+                ValueError,
+                OSError,
+                TypeError,
+                KeyError,
+                IndexError,
+                AttributeError,
+                MemoryError,
+            ) as exc:
+                observation = _invalid_observation(
+                    f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
+                )
+            if not isinstance(observation, Mapping):
+                observation = _invalid_observation("INVALID_EXECUTOR_RECORD")
+            _record_observation(
                 query_index=query_index,
                 profile_index=profile_index,
                 query=query,
                 variant_id=variant_id,
+                observation=_normalize_observation(observation),
             )
-            execution_records[(query_index, profile_index)] = record
+
+    for profile_index, variant_id in enumerate(profile_ids):
+        _execute_variant(profile_index, variant_id)
 
     canonical_records = _serialize_canonical_records(
         records=execution_records,
@@ -548,14 +695,86 @@ def execute_plan(
         configuration_hash=configuration_hash,
         created_at=created_at,
         evidence_class=evidence_class,
+        additional_source_artifact_ids=lineage_additional_source_artifact_ids,
     )
     outcomes = list(canonical_records.outcomes)
     boundaries = list(canonical_records.boundaries)
 
-    profile_inventory = None
+    quality_run = None
+    quality_records: list[dict[str, Any]] = []
+    diagnostic_records: list[dict[str, Any]] = []
+    quality_summary: dict[str, Any] | None = None
     if experiment_plan.data["mode"] == "functional-quality":
+        from types import SimpleNamespace
+
+        def quality_execute(
+            query: Mapping[str, Any], variant_id: str
+        ) -> Mapping[str, Any]:
+            key = (str(query["query_id"]), variant_id)
+            cached = observations_cache.get(key)
+            if cached is not None:
+                return cached
+            try:
+                observation = executor.execute(query, variant_id)
+            except (
+                RuntimeError,
+                ValueError,
+                OSError,
+                TypeError,
+                KeyError,
+                IndexError,
+                AttributeError,
+                MemoryError,
+            ) as exc:
+                observation = _invalid_observation(
+                    f"EXECUTOR_EXCEPTION:{type(exc).__name__}"
+                )
+            if not isinstance(observation, Mapping):
+                observation = _invalid_observation("INVALID_EXECUTOR_RECORD")
+            normalized = _normalize_observation(observation)
+            observations_cache[key] = normalized
+            return normalized
+
+        def quality_diagnostic(
+            query: Mapping[str, Any], variant_id: str, tokens: list[int]
+        ) -> Mapping[str, Any]:
+            method = getattr(executor, "teacher_forced_diagnostic", None)
+            if not callable(method):
+                raise TypeError("DIAGNOSTIC_ADAPTER_UNAVAILABLE")
+            return cast(Mapping[str, Any], method(query, variant_id, tokens))
+
+        from .stage1.quality import FunctionalQualityRunner, QualityExecutor
+
+        quality_executor = cast(
+            QualityExecutor,
+            SimpleNamespace(
+                evidence_class=evidence_class,
+                execute=quality_execute,
+                teacher_forced_diagnostic=quality_diagnostic,
+            ),
+        )
+        quality_run = FunctionalQualityRunner(experiment_plan, quality_executor).run()
+        quality_records = [
+            {**record, "producer_git_sha": producer_git_sha, "created_at": created_at}
+            for record in quality_run.quality_records
+        ]
+        diagnostic_records = [
+            {**record, "producer_git_sha": producer_git_sha, "created_at": created_at}
+            for record in quality_run.diagnostic_records
+        ]
+        quality_summary = {
+            **quality_run.summary,
+            "producer_git_sha": producer_git_sha,
+            "created_at": created_at,
+        }
+
+    profile_inventory = None
+    if (
+        experiment_plan.data["mode"] == "functional-quality"
+        and experiment_plan.data["source_manifest"]["dataset"] != "MMLU-Pro"
+    ):
         profile_inventory = _build_profile_inventory(
-            profile_ids=list(experiment_plan.data["profiles"]),
+            profile_ids=list(profile_ids),
             outcomes=outcomes,
             source_manifest_id=experiment_plan.source_manifest_id,
             source_artifact_id=experiment_plan.data["source_manifest"]["artifact_id"],
@@ -577,6 +796,7 @@ def execute_plan(
             record_count=len(outcomes),
             created_at=created_at,
             evidence_class="analytical",
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "run_id": run_id,
         "plan_id": plan_id,
@@ -596,6 +816,12 @@ def execute_plan(
     }
     if profile_inventory is not None:
         file_contents["profile-inventory.json"] = _canonical_json_file(profile_inventory)
+    if quality_run is not None and quality_summary is not None:
+        file_contents["quality-outcomes.ndjson"] = _canonical_ndjson(quality_records)
+        file_contents["quality-diagnostics.ndjson"] = _canonical_ndjson(
+            diagnostic_records
+        )
+        file_contents["quality-summary.json"] = _canonical_json_file(quality_summary)
     file_hashes: dict[str, str] = {}
     for filename, content in file_contents.items():
         file_hashes[filename] = _write_once(bundle_path / filename, content)
@@ -610,7 +836,19 @@ def execute_plan(
         "indexed_files": list(file_hashes),
     }
     is_smoke = experiment_plan.data["mode"] == "smoke"
-    bundle_claim_scope = "executable-path smoke only" if is_smoke else "executable profile feasibility inventory only"
+    is_mmlu_quality = (
+        experiment_plan.data["mode"] == "functional-quality"
+        and experiment_plan.data["source_manifest"]["dataset"] == "MMLU-Pro"
+    )
+    bundle_claim_scope = (
+        "executable-path smoke only"
+        if is_smoke
+        else (
+            "pinned functional-quality evidence"
+            if is_mmlu_quality
+            else "executable profile feasibility inventory only"
+        )
+    )
     cost_boundary = (
         "omitted/unavailable/smoke-mode-no-cost-adapter"
         if is_smoke
@@ -627,11 +865,17 @@ def execute_plan(
             record_count=len(outcomes),
             created_at=created_at,
             evidence_class=evidence_class,
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "bundle_id": sha256_canonical(bundle_identity),
         "run_id": run_id,
         "plan_id": plan_id,
         "claim_scope": bundle_claim_scope,
+        "quality_claim_scope": (
+            "omitted"
+            if is_smoke
+            else "pinned functional-quality evidence: external correctness, BF16-relative degradation, and separately labeled output diagnostics"
+        ),
         "non_evidentiary": is_smoke,
         "files": [*file_contents, "bundle.json"],
         "artifact_index_file": "artifact-index.json",
@@ -659,6 +903,7 @@ def execute_plan(
             record_count=len(file_hashes),
             created_at=created_at,
             evidence_class="analytical",
+            additional_source_artifact_ids=lineage_additional_source_artifact_ids,
         ),
         "bundle_file": "bundle.json",
         "bundle_artifact_id": file_hashes["bundle.json"],

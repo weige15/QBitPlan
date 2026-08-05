@@ -3,12 +3,15 @@
 from .artifacts import ArtifactBundle
 from .contract import ExperimentPlan, ProfileExecutionResult
 from .executor import TorchAOProfileExecutor
+from .quality import FunctionalQualityRunner, QualityRun
 from .run import execute_plan
 
 __all__ = [
-    "ExperimentPlan",
     "ArtifactBundle",
+    "ExperimentPlan",
+    "FunctionalQualityRunner",
     "ProfileExecutionResult",
+    "QualityRun",
     "TorchAOProfileExecutor",
     "execute_plan",
 ]
