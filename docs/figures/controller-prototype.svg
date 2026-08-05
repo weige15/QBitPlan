@@ -3,7 +3,8 @@
 <rect x="24" y="24" width="1132" height="572" rx="18" fill="white" stroke="#DCE2EC"/>
 <text x="58.0" y="72.0" font-family="Inter,Arial,sans-serif" font-size="26" text-anchor="start" font-weight="700" fill="#172033">QBitPlan controller prototype</text>
 <text x="58.0" y="100.0" font-family="Inter,Arial,sans-serif" font-size="14" text-anchor="start" font-weight="400" fill="#5B6475">Deterministic synthetic fixture — simulated, non-evidentiary</text>
-<text x="80.0" y="148.0" font-family="Inter,Arial,sans-serif" font-size="18" text-anchor="start" font-weight="700" fill="#172033">Exact profile hit rate</text>
+<text x="58.0" y="120.0" font-family="Inter,Arial,sans-serif" font-size="12" text-anchor="start" font-weight="400" fill="#5B6475">Evidence class: simulated | Evidentiary status: non-evidentiary</text>
+<text x="80.0" y="148.0" font-family="Inter,Arial,sans-serif" font-size="18" text-anchor="start" font-weight="700" fill="#172033">Synthetic target-profile match rate</text>
 <text x="650.0" y="148.0" font-family="Inter,Arial,sans-serif" font-size="18" text-anchor="start" font-weight="700" fill="#172033">Per-group bit accuracy</text>
 <line x1="80" y1="490" x2="550" y2="490" stroke="#98A2B3"/>
 <line x1="80" y1="180" x2="80" y2="490" stroke="#98A2B3"/>
