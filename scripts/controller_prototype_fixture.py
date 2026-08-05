@@ -23,7 +23,7 @@ class _RawQuery:
     query_id: str
     structural: FloatArray
     embedding: FloatArray
-    target_profile: Profile
+    synthetic_target_profile: Profile
 
 
 class _SyntheticPrefixContext:
@@ -98,7 +98,7 @@ def _generate_raw_queries(
                     ),
                     structural=_raw_structural_features(generator, signs),
                     embedding=embedding,
-                    target_profile=_target_profile(signs),
+                    synthetic_target_profile=_target_profile(signs),
                 )
             )
     return queries
@@ -115,7 +115,7 @@ def _normalize_queries(
                 structural=normalizer.transform(query.structural),
                 embedding=query.embedding,
             ),
-            target_profiles=(query.target_profile,),
+            target_profiles=(query.synthetic_target_profile,),
         )
         for query in raw_queries
     ]

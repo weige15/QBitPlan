@@ -55,7 +55,8 @@ def _write_svg(metrics: dict[str, Any], path: Path) -> None:
             size=14,
             fill="#5B6475",
         ),
-        _svg_text(80, 148, "Exact profile hit rate", size=18, weight=700),
+        _svg_text(58, 120, "Evidence class: simulated | Evidentiary status: non-evidentiary", size=12, fill="#5B6475"),
+        _svg_text(80, 148, "Synthetic target-profile match rate", size=18, weight=700),
         _svg_text(650, 148, "Per-group bit accuracy", size=18, weight=700),
     ]
 
@@ -83,7 +84,7 @@ def _write_svg(metrics: dict[str, Any], path: Path) -> None:
     bar_width = 82
     gap = 30
     for index, method in enumerate(methods):
-        value = float(method_metrics[method]["feasible_profile_hit_rate"])
+        value = float(method_metrics[method]["synthetic_target_profile_match_rate"])
         bar_height = chart_h * value
         x = chart_x + 25 + index * (bar_width + gap)
         y = chart_y + chart_h - bar_height

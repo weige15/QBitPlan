@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from itertools import product
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,28 +19,30 @@ PrefixContextProvider: TypeAlias = Callable[[str, Profile], Sequence[float]]
 _ALLOWED_BITS = (4, 8)
 
 
+def _readonly_vector(
+    values: Sequence[float],
+    *,
+    dtype: type[np.floating[Any]],
+    name: str,
+) -> NDArray[Any]:
+    vector = np.asarray(values, dtype=dtype)
+    if vector.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if not np.all(np.isfinite(vector)):
+        raise ValueError(f"{name} must contain only finite values")
+    vector = vector.copy()
+    vector.flags.writeable = False
+    return vector
+
+
 def readonly_feature_vector(
     values: Sequence[float], *, name: str
 ) -> FeatureArray:
-    vector = np.asarray(values, dtype=np.float32)
-    if vector.ndim != 1:
-        raise ValueError(f"{name} must be one-dimensional")
-    if not np.all(np.isfinite(vector)):
-        raise ValueError(f"{name} must contain only finite values")
-    vector = vector.copy()
-    vector.flags.writeable = False
-    return vector
+    return _readonly_vector(values, dtype=np.float32, name=name)
 
 
 def readonly_float_vector(values: Sequence[float], *, name: str) -> FloatArray:
-    vector = np.asarray(values, dtype=np.float64)
-    if vector.ndim != 1:
-        raise ValueError(f"{name} must be one-dimensional")
-    if not np.all(np.isfinite(vector)):
-        raise ValueError(f"{name} must contain only finite values")
-    vector = vector.copy()
-    vector.flags.writeable = False
-    return vector
+    return _readonly_vector(values, dtype=np.float64, name=name)
 
 
 def l2_normalize_feature(

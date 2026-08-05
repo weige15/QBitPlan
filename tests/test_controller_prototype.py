@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import csv
+import json
+import subprocess
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from qbitplan.stage1.controller import (
     CausalInteractionPlanner,
+    DirectProfileScorer,
     IndependentGroupScorer,
     QueryFeatures,
     TrainingQuery,
@@ -57,6 +62,64 @@ def test_independent_scorer_respects_executable_profiles_and_canonical_ties() ->
 
     assert scorer.select(_features(0.0)) == (4, 8)
     assert scorer.select(_features(0.0)) in executable
+
+
+def test_direct_scorer_uses_canonical_profile_for_equal_scores() -> None:
+    scorer = DirectProfileScorer.fit(
+        (
+            TrainingQuery(
+                "direct-tie",
+                _features(0.0),
+                ((4, 4), (4, 8)),
+            ),
+        ),
+        ((4, 4), (4, 8)),
+    )
+
+    assert scorer.select(_features(0.0)) == (4, 4)
+
+
+def test_interaction_score_equality_selects_4_bit() -> None:
+    planner = CausalInteractionPlanner.fit(
+        (
+            TrainingQuery(
+                "interaction-tie",
+                _features(0.0),
+                ((4,), (8,)),
+            ),
+        ),
+        enumerate_profiles(1),
+        lambda _query_id, _prefix: np.zeros(2, dtype=np.float64),
+    )
+
+    result = planner.plan(
+        "interaction-tie-runtime",
+        _features(0.0),
+        lambda _query_id, _prefix: np.zeros(2, dtype=np.float64),
+    )
+
+    assert result.valid is True
+    assert result.profile == (4,)
+    assert result.decisions[0].score_4 == result.decisions[0].score_8
+
+
+def test_interaction_planner_returns_explicit_invalid_continuation_result() -> None:
+    planner = CausalInteractionPlanner.fit(
+        (TrainingQuery("invalid", _features(0.0), ((4,),)),),
+        enumerate_profiles(1),
+        lambda _query_id, _prefix: np.zeros(2, dtype=np.float64),
+    )
+    invalid_planner = replace(planner, profiles=())
+
+    result = invalid_planner.plan(
+        "invalid-runtime",
+        _features(0.0),
+        lambda _query_id, _prefix: np.zeros(2, dtype=np.float64),
+    )
+
+    assert result.valid is False
+    assert result.profile is None
+    assert result.reason_code == "NO_EXECUTABLE_CONTINUATION_GROUP_0"
 
 
 def test_interaction_planner_uses_only_the_actually_selected_prefix() -> None:
@@ -116,31 +179,114 @@ def test_paired_bootstrap_is_deterministic_and_paired() -> None:
 
 
 def test_synthetic_prototype_emits_labeled_plot_and_metrics(tmp_path: Path) -> None:
-    metrics = run(output_dir=tmp_path, seed=20260805)
+    metrics = run(output_dir=tmp_path, seed=20260805, source_git_sha="a" * 40)
 
     assert metrics["evidence_class"] == "simulated"
-    assert metrics["methods"]["interaction"]["feasible_profile_hit_rate"] == 1.0
+    assert metrics["evidentiary_status"] == "non-evidentiary"
     assert (
-        metrics["methods"]["interaction"]["feasible_profile_hit_rate"]
-        > metrics["methods"]["independent"]["feasible_profile_hit_rate"]
+        metrics["methods"]["interaction"]["synthetic_target_profile_match_rate"]
+        == 1.0
     )
     assert (
-        metrics["methods"]["direct"]["feasible_profile_hit_rate"]
-        > metrics["methods"]["static"]["feasible_profile_hit_rate"]
+        metrics["methods"]["interaction"]["synthetic_target_profile_match_rate"]
+        > metrics["methods"]["independent"]["synthetic_target_profile_match_rate"]
     )
+    assert (
+        metrics["methods"]["direct"]["synthetic_target_profile_match_rate"]
+        > metrics["methods"]["static"]["synthetic_target_profile_match_rate"]
+    )
+    assert metrics["schema_version"] == "qbitplan.controller-prototype.v2"
+    assert metrics["provenance"]["source_git_sha"] == "a" * 40
+    assert metrics["provenance"]["hardware"]["identity_status"] == "unavailable"
+    assert metrics["provenance"]["query_id_manifest"]["path"] == (
+        "query-manifest.json"
+    )
+    assert metrics["provenance"]["query_id_manifest"]["sha256"]
+    assert "feasible_profile_hit_rate" not in json.dumps(metrics)
     predictions_path = tmp_path / "predictions.csv"
     assert predictions_path.is_file()
     with predictions_path.open(newline="", encoding="utf-8") as handle:
         prediction_rows = list(csv.DictReader(handle))
     assert prediction_rows
     assert {row["evidence_class"] for row in prediction_rows} == {"simulated"}
-    assert {row["schema_version"] for row in prediction_rows} == {
-        "qbitplan.controller-prototype.prediction.v1"
+    assert {row["evidentiary_status"] for row in prediction_rows} == {
+        "non-evidentiary"
     }
+    assert {row["schema_version"] for row in prediction_rows} == {
+        "qbitplan.controller-prototype.prediction.v2"
+    }
+    assert "direct_target_profile_match" in prediction_rows[0]
+    assert all(not key.endswith("_hit") for key in prediction_rows[0])
     assert all(
         "not a Stage-1" in row["claim_boundary"] for row in prediction_rows
     )
     assert (tmp_path / "metrics.json").is_file()
+    assert (tmp_path / "query-manifest.json").is_file()
     svg = (tmp_path / "controller-prototype.svg").read_text(encoding="utf-8")
     assert "simulated, non-evidentiary" in svg
+    assert "Synthetic target-profile match rate" in svg
     assert "No LLM, GPU, quantized weight" in svg
+
+
+def test_query_manifest_hash_and_outputs_are_deterministic(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first = run(output_dir=first_dir, seed=20260805, source_git_sha="a" * 40)
+    second = run(output_dir=second_dir, seed=20260805, source_git_sha="a" * 40)
+
+    first_manifest = (first_dir / "query-manifest.json").read_bytes()
+    second_manifest = (second_dir / "query-manifest.json").read_bytes()
+    assert first_manifest == second_manifest
+    assert first["provenance"]["query_id_manifest"] == second["provenance"][
+        "query_id_manifest"
+    ]
+    assert first["provenance"]["query_id_manifest"]["sha256"]
+    assert (first_dir / "metrics.json").read_bytes() == (
+        second_dir / "metrics.json"
+    ).read_bytes()
+    assert (first_dir / "predictions.csv").read_bytes() == (
+        second_dir / "predictions.csv"
+    ).read_bytes()
+    assert (first_dir / "controller-prototype.svg").read_bytes() == (
+        second_dir / "controller-prototype.svg"
+    ).read_bytes()
+
+
+def test_cli_emits_simulated_non_evidentiary_labels(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.run_controller_prototype",
+            "--output-dir",
+            str(tmp_path),
+            "--seed",
+            "20260805",
+            "--source-git-sha",
+            "a" * 40,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    output = json.loads(result.stdout)
+    assert output["evidence_class"] == "simulated"
+    assert output["evidentiary_status"] == "non-evidentiary"
+    assert "not a Stage-1" in output["claim_boundary"]
+
+
+def test_every_generated_profile_is_executable(tmp_path: Path) -> None:
+    run(output_dir=tmp_path, seed=20260805, source_git_sha="a" * 40)
+    profiles = set(enumerate_profiles(8))
+    with (tmp_path / "predictions.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+
+    for row in rows:
+        for method in ("static", "direct", "independent", "interaction"):
+            assert tuple(
+                4 if bit == "0" else 8
+                for bit in row[f"{method}_profile_id"]
+            ) in profiles
