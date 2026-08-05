@@ -41,7 +41,9 @@ def _canonical_value(value: Any) -> Any:
         return {key: _canonical_value(item) for key, item in items}
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [_canonical_value(item) for item in value]
-    raise ManifestBuildError(f"unsupported value in canonical JSON: {type(value).__name__}")
+    raise ManifestBuildError(
+        f"unsupported value in canonical JSON: {type(value).__name__}"
+    )
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -92,10 +94,14 @@ def _validate_source_record(record: Mapping[str, Any], path: Path) -> None:
     missing = [key for key in required if key not in record]
     if missing:
         raise ManifestBuildError(f"source record {path} is missing fields: {missing}")
-    if not isinstance(record["problem"], str) or not isinstance(record["solution"], str):
+    if not isinstance(record["problem"], str) or not isinstance(
+        record["solution"], str
+    ):
         raise ManifestBuildError(f"source record text fields must be strings: {path}")
     if not isinstance(record["level"], str) or not record["level"]:
-        raise ManifestBuildError(f"source record level must be a non-empty string: {path}")
+        raise ManifestBuildError(
+            f"source record level must be a non-empty string: {path}"
+        )
     if not isinstance(record["type"], str):
         raise ManifestBuildError(f"source record type must be a string: {path}")
 
@@ -103,7 +109,9 @@ def _validate_source_record(record: Mapping[str, Any], path: Path) -> None:
 def _source_id(source_root: Path, path: Path) -> str:
     source_id = path.relative_to(source_root).as_posix()
     if source_id.startswith("./") or "\\" in source_id:
-        raise ManifestBuildError(f"source path is not a normalized POSIX ID: {source_id!r}")
+        raise ManifestBuildError(
+            f"source path is not a normalized POSIX ID: {source_id!r}"
+        )
     return source_id
 
 
@@ -133,7 +141,9 @@ def _load_split(source_root: Path, split: str) -> dict[str, dict[str, Any]]:
 def _load_math500_ids(math500_root: Path) -> list[str]:
     path = math500_root / MATH500_JSONL
     if not path.is_file():
-        raise ManifestBuildError(f"MATH-500 checkout is missing {MATH500_JSONL}: {path}")
+        raise ManifestBuildError(
+            f"MATH-500 checkout is missing {MATH500_JSONL}: {path}"
+        )
 
     ids: list[str] = []
     try:
@@ -151,13 +161,17 @@ def _load_math500_ids(math500_root: Path) -> list[str]:
                     raise ManifestBuildError(
                         f"invalid MATH-500 JSONL at line {line_number}: {exc}"
                     ) from exc
-                if not isinstance(row, dict) or not isinstance(row.get("unique_id"), str):
+                if not isinstance(row, dict) or not isinstance(
+                    row.get("unique_id"), str
+                ):
                     raise ManifestBuildError(
                         f"MATH-500 line {line_number} must contain a string unique_id"
                     )
                 unique_id = row["unique_id"]
                 if unique_id.startswith("./") or "\\" in unique_id:
-                    raise ManifestBuildError(f"MATH-500 unique_id is not normalized: {unique_id!r}")
+                    raise ManifestBuildError(
+                        f"MATH-500 unique_id is not normalized: {unique_id!r}"
+                    )
                 if not unique_id.startswith("test/") or not unique_id.endswith(".json"):
                     raise ManifestBuildError(
                         f"MATH-500 unique_id must be a source test path: {unique_id!r}"
@@ -175,7 +189,9 @@ def _load_math500_ids(math500_root: Path) -> list[str]:
     return sorted(ids)
 
 
-def _record_hashes(records: Mapping[str, Mapping[str, Any]], ids: Sequence[str]) -> dict[str, str]:
+def _record_hashes(
+    records: Mapping[str, Mapping[str, Any]], ids: Sequence[str]
+) -> dict[str, str]:
     return {source_id: sha256_canonical(records[source_id]) for source_id in ids}
 
 
@@ -189,7 +205,9 @@ def _math_prompt(record: Mapping[str, Any]) -> str:
     )
 
 
-def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def build_artifacts(
+    source_root: Path, math500_root: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
     source_root = source_root.resolve()
     math500_root = math500_root.resolve()
     if not source_root.exists():
@@ -221,7 +239,8 @@ def build_artifacts(source_root: Path, math500_root: Path) -> tuple[dict[str, An
     missing_final_ids = sorted(set(final_ids) - set(source_test_ids))
     if missing_final_ids:
         raise ManifestBuildError(
-            "MATH-500 IDs missing from source test set: " + ", ".join(missing_final_ids[:5])
+            "MATH-500 IDs missing from source test set: "
+            + ", ".join(missing_final_ids[:5])
         )
     validation_ids = sorted(set(source_test_ids) - set(final_ids))
     if len(validation_ids) != EXPECTED_VALIDATION_COUNT:
@@ -295,7 +314,9 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> None:
         with path.open("xb") as handle:
             handle.write(canonical_json_bytes(value) + b"\n")
     except FileExistsError as exc:
-        raise ManifestBuildError(f"refusing to overwrite immutable output: {path}") from exc
+        raise ManifestBuildError(
+            f"refusing to overwrite immutable output: {path}"
+        ) from exc
     except OSError as exc:
         raise ManifestBuildError(f"cannot write output {path}: {exc}") from exc
 
@@ -325,10 +346,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.manifest_output.resolve() == args.smoke_plan_output.resolve():
-            raise ManifestBuildError("manifest and smoke-plan outputs must be different files")
+            raise ManifestBuildError(
+                "manifest and smoke-plan outputs must be different files"
+            )
         manifest, smoke_plan = build_artifacts(args.source_root, args.math500_root)
         if args.manifest_output.exists() or args.smoke_plan_output.exists():
-            raise ManifestBuildError("refusing to overwrite an existing immutable output")
+            raise ManifestBuildError(
+                "refusing to overwrite an existing immutable output"
+            )
         _write_once(args.manifest_output, manifest)
         _write_once(args.smoke_plan_output, smoke_plan)
     except (ManifestBuildError, OSError) as exc:

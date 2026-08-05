@@ -58,30 +58,34 @@ def _source_manifest() -> dict[str, Any]:
         },
         "final_source_ids": ["test/final.json"],
     }
-    return _with_manifest_id({
-        **identity,
-        "record_hash_algorithm": "SHA-256(canonical JSON record)",
-        "record_id_format": "source-relative POSIX JSON path",
-        "record_hashes": {
-            "training": {"train/0.json": _sha256(records["train/0.json"])},
-            "validation": {"test/1.json": _sha256(records["test/1.json"])},
-            "final": {"test/final.json": "0000000000000000000000000000000000000000000000000000000000000000"},
-        },
-        "counts": {"training": 1, "validation": 1, "final": 1},
-        "artifact_id": "1" * 64,
-        "raw_artifact": {
+    return _with_manifest_id(
+        {
+            **identity,
+            "record_hash_algorithm": "SHA-256(canonical JSON record)",
+            "record_id_format": "source-relative POSIX JSON path",
+            "record_hashes": {
+                "training": {"train/0.json": _sha256(records["train/0.json"])},
+                "validation": {"test/1.json": _sha256(records["test/1.json"])},
+                "final": {
+                    "test/final.json": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+            },
+            "counts": {"training": 1, "validation": 1, "final": 1},
             "artifact_id": "1" * 64,
-            "source_tree_artifact_id": "2" * 64,
-            "source_archive_url": "https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar",
-            "source_archive_sha256": "1" * 64,
-            "source_layout": "train/**/*.json + test/**/*.json",
-            "source_file_count": 2,
-            "math500_file": "test.jsonl",
-            "math500_file_sha256": "0" * 64,
-        },
+            "raw_artifact": {
+                "artifact_id": "1" * 64,
+                "source_tree_artifact_id": "2" * 64,
+                "source_archive_url": "https://web.archive.org/web/20240101000000id_/https://people.eecs.berkeley.edu/~hendrycks/MATH.tar",
+                "source_archive_sha256": "1" * 64,
+                "source_layout": "train/**/*.json + test/**/*.json",
+                "source_file_count": 2,
+                "math500_file": "test.jsonl",
+                "math500_file_sha256": "0" * 64,
+            },
+        }
+    )
 
 
-    })
 def _sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -209,22 +213,26 @@ class FakeExecutor:
         profile_bits = "00000000" if variant_id == "BF16" else variant_id
         return {
             "status": "complete",
-            "transform_status": "not_applicable" if variant_id == "BF16" else "complete",
+            "transform_status": "not_applicable"
+            if variant_id == "BF16"
+            else "complete",
             "forward_status": "complete",
             "reason_code": None,
-            "transform_reason_code": "REFERENCE_UNQUANTIZED" if variant_id == "BF16" else None,
+            "transform_reason_code": "REFERENCE_UNQUANTIZED"
+            if variant_id == "BF16"
+            else None,
             "forward_reason_code": None,
             "observed_group_prefix": [
                 {
                     "group_index": group_index,
-                    "prefix_bits": "BF16" if variant_id == "BF16" else profile_bits[: group_index + 1],
+                    "prefix_bits": "BF16"
+                    if variant_id == "BF16"
+                    else profile_bits[: group_index + 1],
                 }
                 for group_index in range(8)
             ],
             "token_count": 1,
         }
-
-
 
 
 def _patch_synthetic_manifest_constants(monkeypatch) -> None:
@@ -237,7 +245,9 @@ def _patch_synthetic_manifest_constants(monkeypatch) -> None:
     monkeypatch.setattr(plan_module, "MATH_SOURCE_TREE_ARTIFACT_ID", "2" * 64)
 
 
-def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path, monkeypatch) -> None:
+def test_public_seam_writes_immutable_bundle_with_lineage(
+    tmp_path: Path, monkeypatch
+) -> None:
     _patch_synthetic_manifest_constants(monkeypatch)
     bundle = execute_plan(_plan(tmp_path), executor=FakeExecutor())
 
@@ -256,21 +266,37 @@ def test_public_seam_writes_immutable_bundle_with_lineage(tmp_path: Path, monkey
     }
     outcomes = [
         json.loads(line)
-        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+        for line in (bundle.path / "profile-outcomes.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert len(outcomes) == 8
     assert {row["status"] for row in outcomes} == {"complete"}
-    assert all(row["source_manifest_id"] == _source_manifest()["manifest_id"] for row in outcomes)
+    assert all(
+        row["source_manifest_id"] == _source_manifest()["manifest_id"]
+        for row in outcomes
+    )
     assert all(row["evidence_class"] == "simulated" for row in outcomes)
-    assert len((bundle.path / "group-boundaries.ndjson").read_text(encoding="utf-8").splitlines()) == 64
+    assert (
+        len(
+            (bundle.path / "group-boundaries.ndjson")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        == 64
+    )
 
 
-def test_profile_transform_failure_is_immutable_and_has_no_substitute(tmp_path: Path, monkeypatch) -> None:
+def test_profile_transform_failure_is_immutable_and_has_no_substitute(
+    tmp_path: Path, monkeypatch
+) -> None:
     _patch_synthetic_manifest_constants(monkeypatch)
     bundle = execute_plan(_plan(tmp_path), executor=FakeExecutor("00000000"))
     outcomes = [
         json.loads(line)
-        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+        for line in (bundle.path / "profile-outcomes.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
 
     failed = [row for row in outcomes if row["variant_id"] == "00000000"]
@@ -295,7 +321,9 @@ def test_functional_quality_inventory_attempts_all_canonical_profiles(
 
     bundle = execute_plan(plan, executor=FakeExecutor())
 
-    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    inventory = json.loads(
+        (bundle.path / "profile-inventory.json").read_text(encoding="utf-8")
+    )
     expected_profiles = [f"{profile_id:08b}" for profile_id in range(256)]
     assert inventory["profile_ids"] == expected_profiles
     assert inventory["p_exec"] == expected_profiles
@@ -305,20 +333,58 @@ def test_functional_quality_inventory_attempts_all_canonical_profiles(
     assert inventory["outcome_file"] == "profile-outcomes.ndjson"
     assert inventory["outcome_record_count"] == 2 * 256
 
-    bundle_metadata = json.loads((bundle.path / "bundle.json").read_text(encoding="utf-8"))
-    assert bundle_metadata["claim_scope"] == "executable profile feasibility inventory only"
+    bundle_metadata = json.loads(
+        (bundle.path / "bundle.json").read_text(encoding="utf-8")
+    )
+    assert (
+        bundle_metadata["claim_scope"]
+        == "executable profile feasibility inventory only"
+    )
     assert bundle_metadata["non_evidentiary"] is False
     assert "profile-inventory.json" in bundle_metadata["files"]
-    artifact_index = json.loads((bundle.path / "artifact-index.json").read_text(encoding="utf-8"))
+    assert (
+        bundle_metadata["quality_claim_scope"]
+        == "pinned functional-quality evidence: external correctness, BF16-relative degradation, and separately labeled output diagnostics"
+    )
+    assert "quality-outcomes.ndjson" in bundle_metadata["files"]
+    assert "quality-diagnostics.ndjson" in bundle_metadata["files"]
+    quality_outcomes = (
+        (bundle.path / "quality-outcomes.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    quality_diagnostics = (
+        (bundle.path / "quality-diagnostics.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert len(quality_outcomes) == 2 * 257
+    assert len(quality_diagnostics) == 2 * 257
+    quality_summary = json.loads(
+        (bundle.path / "quality-summary.json").read_text(encoding="utf-8")
+    )
+    assert quality_summary["evidence_class"] == "simulated"
+    artifact_index = json.loads(
+        (bundle.path / "artifact-index.json").read_text(encoding="utf-8")
+    )
     assert "profile-inventory.json" in artifact_index["file_hashes"]
 
     outcomes = [
         json.loads(line)
-        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+        for line in (bundle.path / "profile-outcomes.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert len(outcomes) == 2 * 256
     assert {row["variant_id"] for row in outcomes} == set(expected_profiles)
-    assert len((bundle.path / "group-boundaries.ndjson").read_text(encoding="utf-8").splitlines()) == 2 * 256 * 8
+    assert (
+        len(
+            (bundle.path / "group-boundaries.ndjson")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        == 2 * 256 * 8
+    )
 
 
 def test_functional_quality_inventory_excludes_only_failed_profile(
@@ -331,7 +397,9 @@ def test_functional_quality_inventory_excludes_only_failed_profile(
 
     bundle = execute_plan(plan, executor=FakeExecutor("00000000"))
 
-    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    inventory = json.loads(
+        (bundle.path / "profile-inventory.json").read_text(encoding="utf-8")
+    )
     assert "00000000" not in inventory["p_exec"]
     assert len(inventory["p_exec"]) == 255
     assert inventory["excluded_profiles"] == [
@@ -350,26 +418,31 @@ def test_functional_quality_inventory_excludes_forward_failure_without_substitut
     plan["mode"] = "functional-quality"
     plan["profiles"] = [f"{profile_id:08b}" for profile_id in range(256)]
 
-    bundle = execute_plan(plan, executor=FakeExecutor(failing_forward_profile="00000000"))
+    bundle = execute_plan(
+        plan, executor=FakeExecutor(failing_forward_profile="00000000")
+    )
 
-    inventory = json.loads((bundle.path / "profile-inventory.json").read_text(encoding="utf-8"))
+    inventory = json.loads(
+        (bundle.path / "profile-inventory.json").read_text(encoding="utf-8")
+    )
     assert "00000000" not in inventory["p_exec"]
-    assert {
-        tuple(sorted(item.items()))
-        for item in inventory["excluded_profiles"]
-    } == {
+    assert {tuple(sorted(item.items())) for item in inventory["excluded_profiles"]} == {
         (("profile_id", "00000000"), ("reason_code", "FORWARD_NON_FINITE")),
     }
     failed_outcomes = [
         json.loads(line)
-        for line in (bundle.path / "profile-outcomes.ndjson").read_text(encoding="utf-8").splitlines()
+        for line in (bundle.path / "profile-outcomes.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
         if json.loads(line)["variant_id"] == "00000000"
     ]
     assert len(failed_outcomes) == 2
     assert all(row["forward_status"] == "invalid" for row in failed_outcomes)
 
 
-def test_plan_rejects_unavailable_defaults_before_adapter_execution(tmp_path: Path, monkeypatch) -> None:
+def test_plan_rejects_unavailable_defaults_before_adapter_execution(
+    tmp_path: Path, monkeypatch
+) -> None:
     _patch_synthetic_manifest_constants(monkeypatch)
     plan = _plan(tmp_path)
     del plan["runtime"]["padding"]

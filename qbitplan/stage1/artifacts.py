@@ -46,7 +46,9 @@ class ArtifactBundle:
         rows = list(results)
         expected_count = len(plan.profile_ids) * len(plan.queries)
         if len(rows) != expected_count:
-            raise ValueError(f"expected {expected_count} execution results; got {len(rows)}")
+            raise ValueError(
+                f"expected {expected_count} execution results; got {len(rows)}"
+            )
         expected_keys = {
             (profile_id, query["query_id"])
             for profile_id in plan.profile_ids
@@ -54,7 +56,9 @@ class ArtifactBundle:
         }
         actual_keys = {(row.profile_id, row.query_id) for row in rows}
         if actual_keys != expected_keys:
-            raise ValueError("execution results do not account for every profile/query pair")
+            raise ValueError(
+                "execution results do not account for every profile/query pair"
+            )
 
         created_at = datetime.now(UTC).isoformat()
         execution_result_mappings = [row.to_mapping() for row in rows]
@@ -75,7 +79,9 @@ class ArtifactBundle:
             "plan_id": plan.plan_id,
             "profile_ids": list(plan.profile_ids),
             "execution_results": execution_result_mappings,
-            "execution_results_artifact_id": hashlib.sha256(execution_results_content).hexdigest(),
+            "execution_results_artifact_id": hashlib.sha256(
+                execution_results_content
+            ).hexdigest(),
             "execution_results_file": "execution-results.ndjson",
             "lineage": {
                 "producer_git_sha": plan.data["producer_git_sha"],
@@ -153,7 +159,9 @@ class ArtifactBundle:
                     "created_at": created_at,
                     "bundle_file": "bundle.json",
                     "execution_results_file": "execution-results.ndjson",
-                    "execution_results_artifact_id": payload["execution_results_artifact_id"],
+                    "execution_results_artifact_id": payload[
+                        "execution_results_artifact_id"
+                    ],
                     "manifest_id": plan.manifest_id,
                     "run_id": plan.run_id,
                 }
@@ -179,8 +187,13 @@ class ArtifactBundle:
         if artifact_id != index["artifact_id"]:
             raise ValueError("artifact content hash does not match artifact index")
         execution_results = (bundle_root / index["execution_results_file"]).read_bytes()
-        if hashlib.sha256(execution_results).hexdigest() != index["execution_results_artifact_id"]:
-            raise ValueError("execution-results content hash does not match artifact index")
+        if (
+            hashlib.sha256(execution_results).hexdigest()
+            != index["execution_results_artifact_id"]
+        ):
+            raise ValueError(
+                "execution-results content hash does not match artifact index"
+            )
         payload = _read_json(bundle_path)
         return cls(
             root=bundle_root,

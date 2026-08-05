@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from itertools import pairwise
 from typing import Any, Protocol, TypeVar, cast
 
 from ..execution import (
@@ -22,6 +24,7 @@ from ..identity import sha256_canonical
 from ..plan import COST_DIMENSIONS, ExperimentPlan
 
 DIRECT_EVIDENCE_CLASS = "directly measured"
+OMISSION_EVIDENCE_CLASS = "analytical"
 WARMUP_COUNT = 5
 MEASURED_COUNT = 10
 TRACE_PASS_COUNT = 1
@@ -39,7 +42,11 @@ class PreparedProfileExecutor(Protocol):
     def prepare_variant(self, variant_id: str) -> Mapping[str, Any]: ...
 
     def execute_prepared(
-        self, query: Mapping[str, Any], variant_id: str
+        self,
+        query: Mapping[str, Any],
+        variant_id: str,
+        *,
+        trace: bool = False,
     ) -> Mapping[str, Any]: ...
 
 
@@ -70,7 +77,7 @@ def _omitted(reason: str) -> dict[str, Any]:
     return {
         "status": "omitted/unavailable",
         "reason": reason,
-        "evidence_class": DIRECT_EVIDENCE_CLASS,
+        "evidence_class": OMISSION_EVIDENCE_CLASS,
     }
 
 
@@ -86,7 +93,10 @@ def _measured(value: float, *, unit: str, method: str) -> dict[str, Any]:
 
 def _valid_number(value: Any) -> bool:
     return (
-        isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and value >= 0
     )
 
 
@@ -233,7 +243,7 @@ class NvmlMemoryProbe:
 
 
 class CudaTraceProbe:
-    """Capture one bounded CUDA-event trace without materializing profiler events."""
+    """Capture one separate annotated CUDA trace without mixing primary timing."""
 
     def trace(
         self, operation: Callable[[], T], **_: Any
@@ -254,47 +264,86 @@ class CudaTraceProbe:
         operation_completed = False
         result: T | None = None
         try:
-            _synchronize_cuda()
-            cuda_start = torch.cuda.Event(enable_timing=True)
-            cuda_end = torch.cuda.Event(enable_timing=True)
-            cuda_start.record()
-            operation_started = True
-            host_started_ns = time.perf_counter_ns()
-            result = operation()
-            operation_completed = True
-            cuda_end.record()
-            _synchronize_cuda()
-            host_finished_ns = time.perf_counter_ns()
-            host_elapsed_ns = host_finished_ns - host_started_ns
-            device_elapsed_ns = int(cuda_start.elapsed_time(cuda_end) * 1_000_000)
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=False,
+                profile_memory=True,
+                with_stack=False,
+            ) as profiler:
+                operation_started = True
+                result = operation()
+                operation_completed = True
+                _synchronize_cuda()
+                profiler.step()
+
+            events = [
+                event
+                for event in (
+                    _profiler_event_record(raw_event)
+                    for raw_event in (profiler.events() or [])
+                )
+                if event is not None
+            ]
+            group_events = [
+                event
+                for event in events
+                if _group_trace_bit(event["name"]) is not None
+            ]
+            timestamped_group_events = all(
+                _valid_number(event.get("start_time_us"))
+                and _valid_number(event.get("end_time_us"))
+                for event in group_events
+            )
+            kernel_switch_count: int | None = None
+            if group_events and timestamped_group_events:
+                group_events.sort(key=lambda event: event["start_time_us"])
+                group_bits = [_group_trace_bit(event["name"]) for event in group_events]
+                kernel_switch_count = sum(
+                    left != right
+                    for left, right in pairwise(group_bits)
+                    if left is not None and right is not None
+                )
             omitted_dimensions = {
                 dimension: {
                     "status": "omitted/unavailable",
-                    "reason": "TRACE_ANNOTATION_UNAVAILABLE",
-                    "evidence_class": DIRECT_EVIDENCE_CLASS,
+                    "reason": "no-prefetch-path",
+                    "evidence_class": OMISSION_EVIDENCE_CLASS,
                 }
                 for dimension in (
-                    "host_to_device_bytes",
                     "prefetch_stall_time",
-                    "kernel_switch_count",
                 )
             }
-            return result, {
+            host_to_device_coverage = _omitted(
+                "TRACE_H2D_COPY_BYTES_UNAVAILABLE"
+            )
+            if group_events and timestamped_group_events:
+                kernel_switch_coverage = _measured_coverage(
+                    "annotated qbitplan.group profiler transitions"
+                )
+            elif group_events:
+                kernel_switch_coverage = _omitted(
+                    "TRACE_GROUP_TIMESTAMP_UNAVAILABLE"
+                )
+            else:
+                kernel_switch_coverage = _omitted(
+                    "TRACE_GROUP_ANNOTATION_UNAVAILABLE"
+                )
+            omitted_dimensions["host_to_device_bytes"] = host_to_device_coverage
+            omitted_dimensions["kernel_switch_count"] = kernel_switch_coverage
+            trace: dict[str, Any] = {
                 "status": "complete",
-                "events": [
-                    {
-                        "name": "qbitplan.operation",
-                        "host_start_ns": host_started_ns,
-                        "host_end_ns": host_finished_ns,
-                        "host_elapsed_ns": host_elapsed_ns,
-                        "device_time_ns": device_elapsed_ns,
-                    }
-                ],
-                "method": "CUDA event operation trace",
-                "trace_representation": "bounded_cuda_event",
+                "events": events,
+                "method": "PyTorch CUDA profiler annotated ranges",
+                "trace_representation": "profiler_events",
                 "dimension_coverage": omitted_dimensions,
-                "tracer_overhead": _omitted("CUDA_EVENT_OVERHEAD_NOT_SEPARABLE"),
+                "tracer_overhead": _omitted("PROFILER_OVERHEAD_NOT_SEPARABLE"),
             }
+            if kernel_switch_count is not None:
+                trace["kernel_switch_count"] = kernel_switch_count
+            return result, trace
         except Exception as exc:
             if not operation_started:
                 return cast(T, _invalid_execution(
@@ -309,6 +358,64 @@ class CudaTraceProbe:
                 "status": "invalid",
                 "reason_code": f"CUDA_TRACE_FAILED:{type(exc).__name__}",
             }
+
+
+def _profiler_event_record(event: Any) -> dict[str, Any] | None:
+    """Extract only stable, project-annotated fields from one profiler event."""
+
+    name = _safe_event_attribute(event, "name")
+    is_project_event = isinstance(name, str) and name.startswith("qbitplan.")
+    is_h2d_copy_event = isinstance(name, str) and name.startswith("Memcpy HtoD")
+    if not (is_project_event or is_h2d_copy_event):
+        return None
+    cpu_time_us = _safe_event_attribute(event, "cpu_time_total")
+    if not _valid_number(cpu_time_us) or (
+        cpu_time_us <= 0 and not is_h2d_copy_event
+    ):
+        return None
+    record: dict[str, Any] = {
+        "name": name,
+        "cpu_time_ns": int(float(cpu_time_us) * 1_000),
+    }
+    device_time_us = _safe_event_attribute(event, "device_time_total")
+    if _valid_number(device_time_us):
+        record["device_time_ns"] = int(float(device_time_us) * 1_000)
+    device_memory_bytes = _safe_event_attribute(event, "device_memory_usage")
+    if _valid_number(device_memory_bytes):
+        record["device_memory_bytes"] = int(device_memory_bytes)
+    interval = _safe_event_attribute(event, "time_range")
+    start_us = _safe_event_attribute(interval, "start")
+    end_us = _safe_event_attribute(interval, "end")
+    if _valid_number(start_us):
+        record["start_time_us"] = int(float(start_us))
+    if _valid_number(end_us):
+        record["end_time_us"] = int(float(end_us))
+    return record
+
+
+def _safe_event_attribute(value: Any, name: str) -> Any:
+    try:
+        return getattr(value, name)
+    except Exception:  # noqa: BLE001  # profiler event API varies by version
+        return None
+
+
+def _group_trace_bit(name: str) -> str | None:
+    parts = name.split(".")
+    if len(parts) != 4 or parts[:2] != ["qbitplan", "group"]:
+        return None
+    if not parts[2].isdigit() or not (0 <= int(parts[2]) < 8):
+        return None
+    bit = parts[3]
+    return bit if bit in {"0", "1", "BF16"} else None
+
+
+def _measured_coverage(method: str) -> dict[str, Any]:
+    return {
+        "status": "measured",
+        "method": method,
+        "evidence_class": DIRECT_EVIDENCE_CLASS,
+    }
 
 
 def _synchronize_cuda() -> None:
@@ -540,7 +647,9 @@ class DirectCostRunner:
 
         try:
             trace_result, trace_observation = self.trace_probe.trace(
-                lambda: self.executor.execute_prepared(query, variant_id),
+                lambda: self.executor.execute_prepared(
+                    query, variant_id, trace=True
+                ),
                 query_id=query["query_id"],
                 variant_id=variant_id,
             )
@@ -553,7 +662,8 @@ class DirectCostRunner:
             }
         trace_observation = dict(trace_observation)
         trace_observation.setdefault("status", "invalid")
-        trace_observation.setdefault("reason_code", "TRACE_UNAVAILABLE")
+        if trace_observation["status"] != "complete":
+            trace_observation.setdefault("reason_code", "TRACE_UNAVAILABLE")
         trace_observation["evidence_class"] = DIRECT_EVIDENCE_CLASS
         if (
             trace_result["status"] != "complete"

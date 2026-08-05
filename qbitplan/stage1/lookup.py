@@ -102,7 +102,9 @@ class LookupCostEstimateAdapter:
                 details.append(f"missing {missing}")
             if unexpected:
                 details.append(f"unexpected {unexpected}")
-            raise ValueError(f"lookup table has unspecified fields: {', '.join(details)}")
+            raise ValueError(
+                f"lookup table has unspecified fields: {', '.join(details)}"
+            )
         if table["schema_version"] != "qbitplan.stage1.lookup-cost-table.v1":
             raise ValueError("lookup table has an unsupported schema_version")
         method = _require_nonempty_string(table["method"], "lookup table method")
@@ -110,7 +112,9 @@ class LookupCostEstimateAdapter:
             raise ValueError(
                 f"lookup table evidence_class must be {LOOKUP_EVIDENCE_CLASS!r}"
             )
-        source = _require_mapping(table["source_artifact"], "lookup table source_artifact")
+        source = _require_mapping(
+            table["source_artifact"], "lookup table source_artifact"
+        )
         source_artifact_id = _require_nonempty_string(
             source.get("artifact_id"), "lookup table source_artifact.artifact_id"
         )
@@ -129,20 +133,30 @@ class LookupCostEstimateAdapter:
             raise ValueError("coverage_manifest has unspecified fields")
         if coverage["schema_version"] != "qbitplan.stage1.lookup-cost-coverage.v1":
             raise ValueError("coverage_manifest has an unsupported schema_version")
-        query_ids = _unique_strings(coverage["query_ids"], "coverage_manifest.query_ids")
+        query_ids = _unique_strings(
+            coverage["query_ids"], "coverage_manifest.query_ids"
+        )
         profile_ids = [
             _profile_id(item, "coverage_manifest.profile_ids entry")
-            for item in _unique_strings(coverage["profile_ids"], "coverage_manifest.profile_ids")
+            for item in _unique_strings(
+                coverage["profile_ids"], "coverage_manifest.profile_ids"
+            )
         ]
-        dimensions = _unique_strings(coverage["dimensions"], "coverage_manifest.dimensions")
+        dimensions = _unique_strings(
+            coverage["dimensions"], "coverage_manifest.dimensions"
+        )
         if not dimensions or set(dimensions) - set(COST_DIMENSIONS):
-            raise ValueError("coverage_manifest.dimensions must be accepted cost dimensions")
+            raise ValueError(
+                "coverage_manifest.dimensions must be accepted cost dimensions"
+            )
         coverage_payload = {
             key: coverage[key]
             for key in ("schema_version", "query_ids", "profile_ids", "dimensions")
         }
         if coverage["manifest_id"] != sha256_canonical(coverage_payload):
-            raise ValueError("coverage_manifest.manifest_id does not match its canonical payload")
+            raise ValueError(
+                "coverage_manifest.manifest_id does not match its canonical payload"
+            )
         entries = table["entries"]
         if not isinstance(entries, list):
             raise ValueError("lookup table entries must be an array")  # noqa: TRY004
@@ -151,8 +165,12 @@ class LookupCostEstimateAdapter:
         for index, raw_entry in enumerate(entries):
             entry = _require_mapping(raw_entry, f"lookup table entries[{index}]")
             if set(entry) != {"query_id", "profile_id", "costs"}:
-                raise ValueError(f"lookup table entries[{index}] has unspecified fields")
-            query_id = _require_nonempty_string(entry["query_id"], "lookup entry query_id")
+                raise ValueError(
+                    f"lookup table entries[{index}] has unspecified fields"
+                )
+            query_id = _require_nonempty_string(
+                entry["query_id"], "lookup entry query_id"
+            )
             profile_id = _profile_id(entry["profile_id"], "lookup entry profile_id")
             key = (query_id, profile_id)
             if query_id not in query_ids or profile_id not in profile_ids:
@@ -162,15 +180,21 @@ class LookupCostEstimateAdapter:
             if key in seen:
                 raise ValueError(f"lookup table contains duplicate entry {key!r}")
             seen.add(key)
-            costs = _require_mapping(entry["costs"], f"lookup table entries[{index}].costs")
+            costs = _require_mapping(
+                entry["costs"], f"lookup table entries[{index}].costs"
+            )
             if set(costs) - set(dimensions):
-                raise ValueError(f"lookup entry {key!r} contains an uncovered dimension")
+                raise ValueError(
+                    f"lookup entry {key!r} contains an uncovered dimension"
+                )
             normalized_entries.append(
                 {
                     "query_id": query_id,
                     "profile_id": profile_id,
                     "costs": {
-                        dimension: _validate_cost(value, f"lookup entry {key!r}.{dimension}")
+                        dimension: _validate_cost(
+                            value, f"lookup entry {key!r}.{dimension}"
+                        )
                         for dimension, value in costs.items()
                     },
                 }
@@ -255,7 +279,9 @@ class LookupCostEstimateAdapter:
         status = "complete" if not omitted_dimensions else "incomplete"
         return {
             "status": status,
-            "reason_code": "LOOKUP_COVERAGE_COMPLETE" if status == "complete" else "LOOKUP_COVERAGE_INCOMPLETE",
+            "reason_code": "LOOKUP_COVERAGE_COMPLETE"
+            if status == "complete"
+            else "LOOKUP_COVERAGE_INCOMPLETE",
             "cost_vector": cost_vector,
             "method": self._table["method"],
             "lookup_artifact_id": self._lookup_artifact_id,

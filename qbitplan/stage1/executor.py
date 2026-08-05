@@ -108,14 +108,22 @@ class TorchAOProfileExecutor:
         return preparation
 
     def execute_prepared(
-        self, query: Mapping[str, Any], variant_id: str
+        self,
+        query: Mapping[str, Any],
+        variant_id: str,
+        *,
+        trace: bool = False,
     ) -> Mapping[str, Any]:
         """Execute a query against the already prepared profile."""
 
         try:
             model = self._model_for_variant(variant_id)
             return self._run_forward(
-                model, self._load_tokenizer(), query["prompt"], variant_id
+                model,
+                self._load_tokenizer(),
+                query["prompt"],
+                variant_id,
+                trace=trace,
             )
         except _ExecutionFailure as exc:
             return self._failure_observation(
@@ -631,7 +639,13 @@ class TorchAOProfileExecutor:
                 )
 
     def _run_forward(
-        self, model: Any, tokenizer: Any, prompt: str, variant_id: str
+        self,
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        variant_id: str,
+        *,
+        trace: bool = False,
     ) -> Mapping[str, Any]:
         try:
             import torch
@@ -654,18 +668,46 @@ class TorchAOProfileExecutor:
             > max_positions
         ):
             raise _ExecutionFailure("PROMPT_GENERATION_OVERFLOW")
-        encoded = {key: value.to(device) for key, value in encoded.items()}
+        if trace:
+            with torch.profiler.record_function("qbitplan.h2d"):
+                encoded = {key: value.to(device) for key, value in encoded.items()}
+        else:
+            encoded = {key: value.to(device) for key, value in encoded.items()}
         prefix: list[dict[str, Any]] = []
         observed_groups: set[int] = set()
+        group_scopes: dict[int, Any] = {}
         handles = []
         layers = model.model.layers
-        for group_index in range(8):
+        for group_index in range(8) if trace else ():
             layer = layers[(group_index + 1) * 4 - 1]
+
+            bit = (
+                "BF16"
+                if variant_id == "BF16"
+                else variant_id[group_index]
+            )
+
+            def pre_hook(
+                module: Any,
+                inputs: Any,
+                *,
+                index: int = group_index,
+                profile_bit: str = bit,
+            ) -> None:
+                del module, inputs
+                scope = torch.profiler.record_function(
+                    f"qbitplan.group.{index}.{profile_bit}"
+                )
+                scope.__enter__()
+                group_scopes[index] = scope
 
             def hook(
                 module: Any, inputs: Any, output: Any, *, index: int = group_index
             ) -> None:
                 del module, inputs, output
+                scope = group_scopes.pop(index, None)
+                if scope is not None:
+                    scope.__exit__(None, None, None)
                 if index not in observed_groups:
                     observed_groups.add(index)
                     prefix.append(
@@ -677,6 +719,7 @@ class TorchAOProfileExecutor:
                         }
                     )
 
+            handles.append(layer.register_forward_pre_hook(pre_hook))
             handles.append(layer.register_forward_hook(hook))
         try:
             with torch.inference_mode():
@@ -709,13 +752,25 @@ class TorchAOProfileExecutor:
             )
             raise _ExecutionFailure(reason) from exc
         finally:
+            for scope in group_scopes.values():
+                scope.__exit__(None, None, None)
             for handle in handles:
                 handle.remove()
         if [entry["group_index"] for entry in prefix] != list(range(8)):
-            raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER")
+            if trace:
+                raise _ExecutionFailure("INCOMPLETE_GROUP_ORDER")
+            prefix = [
+                {
+                    "group_index": index,
+                    "prefix_bits": "BF16"
+                    if variant_id == "BF16"
+                    else variant_id[: index + 1],
+                }
+                for index in range(8)
+            ]
         token_values = generated[0].detach().cpu().tolist()
         completion_tokens = token_values[input_length:]
-        return {
+        result = {
             "status": "complete",
             "transform_status": "not_applicable"
             if variant_id == "BF16"
@@ -736,6 +791,7 @@ class TorchAOProfileExecutor:
                 canonical_json_bytes(token_values)
             ).hexdigest(),
         }
+        return result
 
     def teacher_forced_diagnostic(
         self,

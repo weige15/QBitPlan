@@ -27,6 +27,8 @@ def execute_plan(plan: ExperimentPlan, executor: ProfileExecutor) -> ArtifactBun
             if not isinstance(result, ProfileExecutionResult):
                 raise TypeError("profile executors must return ProfileExecutionResult")
             if result.profile_id != profile_id or result.query_id != query["query_id"]:
-                raise ValueError("profile executor returned a result for the wrong profile/query")
+                raise ValueError(
+                    "profile executor returned a result for the wrong profile/query"
+                )
             results.append(result)
     return ArtifactBundle.write(plan, results)

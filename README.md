@@ -92,3 +92,7 @@ NVML or trace coverage is recorded as `omitted/unavailable` and is never
 replaced with zero or lookup evidence. The bundle remains bounded to the
 pinned model, two-query smoke frame, four declared profiles, and selected GPU.
 
+Issue #32 adds the bounded direct-cost smoke path for diagnosing profile
+exclusions. It uses the existing public plan/executor seam, records setup and
+per-dimension hardware evidence in a separate immutable bundle, and keeps
+quality and systems-benefit claims omitted from the smoke result.

@@ -31,7 +31,6 @@ class FakeSmokeExecutor:
         )
 
 
-
 class FailingSmokeExecutor(FakeSmokeExecutor):
     def execute(self, profile_id: str, query: dict[str, str]) -> ProfileExecutionResult:
         if profile_id == "00000000":
@@ -48,6 +47,7 @@ class FailingSmokeExecutor(FakeSmokeExecutor):
             )
         return super().execute(profile_id, query)
 
+
 def source_manifest() -> dict[str, object]:
     identity = {
         "dataset": "MATH",
@@ -60,6 +60,7 @@ def source_manifest() -> dict[str, object]:
     }
     return {**identity, "artifact_id": content_hash(identity)}
 
+
 def math_query(query_id: str, phase: str, problem: str) -> dict[str, object]:
     record = {
         "problem": problem,
@@ -68,7 +69,8 @@ def math_query(query_id: str, phase: str, problem: str) -> dict[str, object]:
         "type": "Algebra",
     }
     prompt = (
-        "Problem:\n" + problem
+        "Problem:\n"
+        + problem
         + "\n\nSolve the problem. Show your reasoning and put the final answer in\n"
         + "\\boxed{...}.\nSolution:"
     )
@@ -84,6 +86,7 @@ def math_query(query_id: str, phase: str, problem: str) -> dict[str, object]:
         "prompt": prompt,
         "permitted": True,
     }
+
 
 def smoke_plan(artifact_root: Path) -> ExperimentPlan:
 
@@ -185,7 +188,9 @@ def smoke_plan(artifact_root: Path) -> ExperimentPlan:
     )
 
 
-def test_smoke_seam_writes_immutable_bundle_with_all_profile_outcomes(tmp_path: Path) -> None:
+def test_smoke_seam_writes_immutable_bundle_with_all_profile_outcomes(
+    tmp_path: Path,
+) -> None:
     plan = smoke_plan(tmp_path / "artifacts")
 
     bundle = execute_plan(plan, FakeSmokeExecutor())
@@ -201,8 +206,12 @@ def test_smoke_seam_writes_immutable_bundle_with_all_profile_outcomes(tmp_path: 
     assert payload["evidence_class"] == "analytical"
     assert payload["profile_ids"] == ["bf16", "00000000", "11111111", "01010101"]
     assert len(payload["execution_results"]) == 8
-    assert {row["evidence_class"] for row in payload["execution_results"]} == {"simulated"}
-    assert all(row["terminal_status"] == "complete" for row in payload["execution_results"])
+    assert {row["evidence_class"] for row in payload["execution_results"]} == {
+        "simulated"
+    }
+    assert all(
+        row["terminal_status"] == "complete" for row in payload["execution_results"]
+    )
     assert payload["lineage"]["manifest_id"] == bundle.manifest_id
     assert payload["lineage"]["run_id"] == bundle.run_id
     execution_results_path = bundle.root / "execution-results.ndjson"
@@ -212,6 +221,7 @@ def test_smoke_seam_writes_immutable_bundle_with_all_profile_outcomes(tmp_path: 
 
     with pytest.raises(FileExistsError):
         execute_plan(plan, FakeSmokeExecutor())
+
 
 def test_transform_failure_is_recorded_and_never_substituted(tmp_path: Path) -> None:
     bundle = execute_plan(smoke_plan(tmp_path / "artifacts"), FailingSmokeExecutor())
@@ -234,12 +244,14 @@ def test_transform_failure_is_recorded_and_never_substituted(tmp_path: Path) -> 
         "01010101",
     }
 
+
 def test_plan_rejects_an_omitted_scientific_control(tmp_path: Path) -> None:
     raw = json.loads(json.dumps(smoke_plan(tmp_path / "artifacts").data))
     del raw["decoder"]["num_beams"]
 
     with pytest.raises(ValueError, match="decoder controls"):
         ExperimentPlan.from_mapping(raw)
+
 
 def test_plan_rejects_a_query_not_explicitly_marked_permitted(tmp_path: Path) -> None:
     raw = json.loads(json.dumps(smoke_plan(tmp_path / "artifacts").data))
@@ -255,6 +267,7 @@ def test_plan_rejects_a_query_source_outside_the_manifest(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="not permitted"):
         ExperimentPlan.from_mapping(raw)
+
 
 def test_scientific_cli_has_no_fake_adapter_selector(tmp_path: Path) -> None:
     result = subprocess.run(

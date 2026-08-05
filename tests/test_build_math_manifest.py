@@ -90,12 +90,21 @@ def test_build_command_writes_separated_manifest_and_smoke_plan(tmp_path: Path) 
     expected_train_hash = hashlib.sha256(
         b'{"level":"Level 1","problem":"train-0","solution":"solution for train-0","type":"Algebra"}'
     ).hexdigest()
-    assert manifest["record_hashes"]["training"]["train/algebra/0.json"] == expected_train_hash
+    assert (
+        manifest["record_hashes"]["training"]["train/algebra/0.json"]
+        == expected_train_hash
+    )
 
     smoke_plan = json.loads(smoke_path.read_text(encoding="utf-8"))
     assert smoke_plan["manifest_artifact_id"] == manifest["artifact_id"]
-    assert {query["phase"] for query in smoke_plan["queries"]} == {"training", "validation"}
-    assert all(query["source_artifact_id"] == manifest["artifact_id"] for query in smoke_plan["queries"])
+    assert {query["phase"] for query in smoke_plan["queries"]} == {
+        "training",
+        "validation",
+    }
+    assert all(
+        query["source_artifact_id"] == manifest["artifact_id"]
+        for query in smoke_plan["queries"]
+    )
     assert all(query["permitted"] is True for query in smoke_plan["queries"])
     assert all("Problem:\n" in query["prompt"] for query in smoke_plan["queries"])
 

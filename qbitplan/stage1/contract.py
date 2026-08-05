@@ -49,7 +49,9 @@ def _normalize_canonical_value(value: Any) -> Any:
 
     if isinstance(value, float):
         if not value.is_integer():
-            raise ValueError("non-integral floats are not supported in canonical identity JSON")
+            raise ValueError(
+                "non-integral floats are not supported in canonical identity JSON"
+            )
         return int(value)
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
@@ -57,7 +59,9 @@ def _normalize_canonical_value(value: Any) -> Any:
         normalized = {
             key: _normalize_canonical_value(item) for key, item in value.items()
         }
-        return dict(sorted(normalized.items(), key=lambda item: item[0].encode("utf-16-be")))
+        return dict(
+            sorted(normalized.items(), key=lambda item: item[0].encode("utf-16-be"))
+        )
     if isinstance(value, list):
         return [_normalize_canonical_value(item) for item in value]
     return value
@@ -122,8 +126,13 @@ class ExperimentPlan:
         file_hashes = _require(tokenizer, "file_hashes")
         if not isinstance(file_hashes, dict) or not file_hashes:
             raise ValueError("tokenizer file_hashes must be a non-empty object")
-        if any(not isinstance(name, str) or not isinstance(digest, str) or not digest for name, digest in file_hashes.items()):
-            raise ValueError("tokenizer file_hashes must map filenames to non-empty hashes")
+        if any(
+            not isinstance(name, str) or not isinstance(digest, str) or not digest
+            for name, digest in file_hashes.items()
+        ):
+            raise ValueError(
+                "tokenizer file_hashes must map filenames to non-empty hashes"
+            )
         _require_exact(tokenizer, "use_fast", True)
         _require_exact(tokenizer, "trust_remote_code", False)
 
@@ -180,7 +189,9 @@ class ExperimentPlan:
             "diversity_penalty": 0.0,
         }
         if dict(decoder) != expected_decoder:
-            raise ValueError("decoder controls must exactly match the accepted smoke controls")
+            raise ValueError(
+                "decoder controls must exactly match the accepted smoke controls"
+            )
 
         runtime = _require_mapping(data, "runtime")
         expected_runtime = {
@@ -203,7 +214,9 @@ class ExperimentPlan:
             "deterministic_algorithms": True,
         }
         if dict(runtime) != expected_runtime:
-            raise ValueError("runtime controls must exactly match the accepted smoke controls")
+            raise ValueError(
+                "runtime controls must exactly match the accepted smoke controls"
+            )
 
         seeds = _require_mapping(data, "seeds")
         if dict(seeds) != {
@@ -212,11 +225,17 @@ class ExperimentPlan:
             "torch_cpu": 20260807,
             "torch_cuda": 20260807,
         }:
-            raise ValueError("seed controls must exactly match the accepted smoke controls")
+            raise ValueError(
+                "seed controls must exactly match the accepted smoke controls"
+            )
 
         source_manifest = _require_mapping(data, "source_manifest")
         _require_exact(source_manifest, "dataset", "MATH")
-        _require_exact(source_manifest, "source_revision", "985bdc1696e88e8643f081a0ff4719da39f2ae2a")
+        _require_exact(
+            source_manifest,
+            "source_revision",
+            "985bdc1696e88e8643f081a0ff4719da39f2ae2a",
+        )
         permitted_source_ids = _require_mapping(source_manifest, "permitted_source_ids")
         training_source_ids = _require(permitted_source_ids, "training")
         validation_source_ids = _require(permitted_source_ids, "validation")
@@ -231,7 +250,9 @@ class ExperimentPlan:
             raise ValueError("source manifest IDs must be non-empty string lists")
         if set(training_source_ids) & set(validation_source_ids):
             raise ValueError("training and validation source IDs must be disjoint")
-        if set(training_source_ids) & set(final_source_ids) or set(validation_source_ids) & set(final_source_ids):
+        if set(training_source_ids) & set(final_source_ids) or set(
+            validation_source_ids
+        ) & set(final_source_ids):
             raise ValueError("final source IDs must be disjoint from smoke source IDs")
         manifest_identity = {
             "dataset": source_manifest["dataset"],
@@ -242,7 +263,9 @@ class ExperimentPlan:
         _require_exact(source_manifest, "artifact_id", content_hash(manifest_identity))
         queries = _require(data, "queries")
         if not isinstance(queries, list) or len(queries) != 2:
-            raise ValueError("smoke plan must contain exactly one training and one validation query")
+            raise ValueError(
+                "smoke plan must contain exactly one training and one validation query"
+            )
         phases = set()
         for query in queries:
             if not isinstance(query, dict):
@@ -261,33 +284,50 @@ class ExperimentPlan:
             ):
                 _require(query, key)
             _require_exact(query, "dataset", "MATH")
-            _require_exact(query, "source_revision", "985bdc1696e88e8643f081a0ff4719da39f2ae2a")
+            _require_exact(
+                query, "source_revision", "985bdc1696e88e8643f081a0ff4719da39f2ae2a"
+            )
             if not isinstance(query["source_id"], str) or not query["source_id"]:
                 raise ValueError("smoke queries require a source-defined query ID")
-            if not isinstance(query["source_artifact_id"], str) or not query["source_artifact_id"]:
+            if (
+                not isinstance(query["source_artifact_id"], str)
+                or not query["source_artifact_id"]
+            ):
                 raise ValueError("smoke queries require a source artifact ID")
             record = query["record"]
             if not isinstance(record, dict):
                 raise ValueError("each smoke query record must be an object")  # noqa: TRY004
             for key in ("problem", "solution", "level", "type"):
                 _require(record, key)
-            if any(not isinstance(record[key], str) for key in ("problem", "solution", "level", "type")):
+            if any(
+                not isinstance(record[key], str)
+                for key in ("problem", "solution", "level", "type")
+            ):
                 raise ValueError("MATH source record fields must be strings")
             if not isinstance(query["query_id"], str) or not query["query_id"]:
                 raise ValueError("smoke queries require a non-empty query ID")
             if query["record_hash"] != content_hash(record):
-                raise ValueError(f"record_hash does not match source record {query['query_id']}")
+                raise ValueError(
+                    f"record_hash does not match source record {query['query_id']}"
+                )
             expected_prompt = (
-                "Problem:\n" + record["problem"]
+                "Problem:\n"
+                + record["problem"]
                 + "\n\nSolve the problem. Show your reasoning and put the final answer in\n"
                 + "\\boxed{...}.\nSolution:"
             )
             if query["prompt"] != expected_prompt:
-                raise ValueError(f"prompt does not match the accepted MATH format for {query['query_id']}")
+                raise ValueError(
+                    f"prompt does not match the accepted MATH format for {query['query_id']}"
+                )
             if query["phase"] not in {"training", "validation"}:
-                raise ValueError("smoke queries may only be training or validation records")
+                raise ValueError(
+                    "smoke queries may only be training or validation records"
+                )
             allowed_source_ids = (
-                training_source_ids if query["phase"] == "training" else validation_source_ids
+                training_source_ids
+                if query["phase"] == "training"
+                else validation_source_ids
             )
             if query["source_id"] not in allowed_source_ids:
                 raise ValueError("query source ID is not permitted for its phase")
@@ -295,7 +335,9 @@ class ExperimentPlan:
             _require_exact(query, "permitted", True)
             phases.add(query["phase"])
         if phases != {"training", "validation"}:
-            raise ValueError("smoke plan must contain one training and one validation query")
+            raise ValueError(
+                "smoke plan must contain one training and one validation query"
+            )
         if len({query["query_id"] for query in queries}) != len(queries):
             raise ValueError("query IDs must be unique")
 
@@ -402,7 +444,9 @@ class ProfileExecutionResult:
             or self.forward_status != "complete"
             or self.terminal_status != "complete"
         ):
-            raise ValueError("an executable result must have complete transform and forward statuses")
+            raise ValueError(
+                "an executable result must have complete transform and forward statuses"
+            )
 
     def to_mapping(self) -> dict[str, Any]:
         return {

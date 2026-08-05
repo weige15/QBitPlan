@@ -86,7 +86,7 @@ python scripts/build_mmlu_manifest.py \
 
 The source-faithful option list is retained per question (the pinned source has
 some reviewed rows with fewer than ten options); options are never padded or
-fabricated. The final plan consumes the frozen non-final MATH `P_exec` inventory by immutable file hash; it embeds the canonical prompts and records, and pins
+fabricated. The final plan embeds the canonical prompts and records, and pins
 the tokenizer file hashes declared by the execution contract:
 
 ```bash
@@ -113,7 +113,6 @@ MMLU-Pro is final-only cross-dataset evidence. Its outcomes are reported
 separately from non-final MATH calibration and validation; the bundle claims
 quality and diagnostics only, not cost or systems benefit.
 
-
 ## Direct-cost smoke frame
 
 Issue #30 uses a validated plan declaring `mode` as `direct-cost` and the same
@@ -135,3 +134,28 @@ repetitions, and writes one separate trace pass. Its immutable bundle contains
 `trace-observations.ndjson`, and `cost-coverage.ndjson` alongside the plan and
 run manifests. Only valid dimensions are directly measured; unavailable
 dimensions carry explicit omission reasons.
+
+## Issue #32 OOM diagnosis and direct-cost smoke
+
+Issue #32 adds a direct hardware-cost smoke mode over the same explicit
+`ExperimentPlan` and the same two permitted non-final MATH records. Run it with
+a new immutable `attempt_id` and plan-declared artifact root:
+
+```bash
+qbitplan stage1 run \
+  --plan /path/to/direct-cost-plan.json \
+  --mode direct-cost \
+  --smoke \
+  --gpu-uuid GPU-UUID
+```
+
+The direct-cost bundle records setup/quantization observations separately from
+query execution, five warmups, ten unprofiled measurements, one traced pass,
+and per-dimension coverage. Setup, memory, latency, and valid trace
+observations are directly measured; dimensions without accepted coverage are
+`omitted/unavailable/<reason>`, never zero or a lookup fallback. The bundle is
+non-evidentiary for task quality and systems benefit.
+
+The real executor retains only one prepared profile at a time and releases it
+before the next profile. Transform or forward failures remain immutable invalid
+records and never substitute BF16, a nearby profile, or fake quantization.

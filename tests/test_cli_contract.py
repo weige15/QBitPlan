@@ -5,7 +5,9 @@ import pytest
 from qbitplan.cli import main
 
 
-def test_scientific_cli_has_no_fake_adapter_selector(capsys: pytest.CaptureFixture[str]) -> None:
+def test_scientific_cli_has_no_fake_adapter_selector(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit) as error:
         main(
             [

@@ -15,7 +15,9 @@ def test_estimate_cost_cli_uses_lookup_adapter_without_gpu(
 ) -> None:
     _patch_synthetic_manifest_constants(monkeypatch)
     plan_path = tmp_path / "estimate-plan.json"
-    plan_path.write_text(json.dumps(_estimate_plan(tmp_path / "artifacts")), encoding="utf-8")
+    plan_path.write_text(
+        json.dumps(_estimate_plan(tmp_path / "artifacts")), encoding="utf-8"
+    )
     table_path = tmp_path / "lookup-table.json"
     table_path.write_text(json.dumps(_lookup_table()), encoding="utf-8")
 

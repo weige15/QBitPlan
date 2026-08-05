@@ -5,3 +5,5 @@ data/pinned/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+/artifacts/
+/data/manifests/math-direct-cost-*-attempt-*.json

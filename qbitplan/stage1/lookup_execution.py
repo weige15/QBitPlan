@@ -37,37 +37,59 @@ def _cost_observation_fields(observation: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"cost adapter observation requires a non-empty {label}")
     vector = observation["cost_vector"]
     if not isinstance(vector, Mapping) or set(vector) != set(COST_DIMENSIONS):
-        raise ValueError("cost adapter observation must contain the complete six-dimension vector")
+        raise ValueError(
+            "cost adapter observation must contain the complete six-dimension vector"
+        )
     omitted = 0
     for dimension in COST_DIMENSIONS:
         value = vector[dimension]
         if not isinstance(value, Mapping):
             raise ValueError(f"cost vector dimension {dimension} must be an object")  # noqa: TRY004
         if value.get("evidence_class") != "lookup-table estimated":
-            raise ValueError(f"cost vector dimension {dimension} is not lookup-table estimated")
+            raise ValueError(
+                f"cost vector dimension {dimension} is not lookup-table estimated"
+            )
         if value.get("lookup_artifact_id") != observation["lookup_artifact_id"]:
-            raise ValueError(f"cost vector dimension {dimension} has mismatched lookup lineage")
+            raise ValueError(
+                f"cost vector dimension {dimension} has mismatched lookup lineage"
+            )
         if value.get("source_artifact_id") != observation["source_artifact_id"]:
-            raise ValueError(f"cost vector dimension {dimension} has mismatched source lineage")
+            raise ValueError(
+                f"cost vector dimension {dimension} has mismatched source lineage"
+            )
         status = value.get("status")
         if status == "estimated":
             raw_value = value.get("value")
             if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-                raise ValueError(f"cost vector dimension {dimension} has a non-numeric estimate")
+                raise ValueError(
+                    f"cost vector dimension {dimension} has a non-numeric estimate"
+                )
             if not math.isfinite(raw_value) or raw_value < 0:
-                raise ValueError(f"cost vector dimension {dimension} has an invalid estimate")
+                raise ValueError(
+                    f"cost vector dimension {dimension} has an invalid estimate"
+                )
             if "reason" in value:
-                raise ValueError(f"estimated cost dimension {dimension} has an omission reason")
+                raise ValueError(
+                    f"estimated cost dimension {dimension} has an omission reason"
+                )
         elif status == "omitted/unavailable":
             omitted += 1
             if not isinstance(value.get("reason"), str) or not value["reason"]:
-                raise ValueError(f"omitted cost dimension {dimension} requires a reason")
+                raise ValueError(
+                    f"omitted cost dimension {dimension} requires a reason"
+                )
             if "value" in value:
-                raise ValueError(f"omitted cost dimension {dimension} must not contain a value")
+                raise ValueError(
+                    f"omitted cost dimension {dimension} must not contain a value"
+                )
         else:
-            raise ValueError(f"cost vector dimension {dimension} has an unsupported status")
+            raise ValueError(
+                f"cost vector dimension {dimension} has an unsupported status"
+            )
     if (observation["status"] == "complete") != (omitted == 0):
-        raise ValueError("cost adapter terminal status does not match dimension coverage")
+        raise ValueError(
+            "cost adapter terminal status does not match dimension coverage"
+        )
     if not isinstance(observation["coverage"], Mapping):
         raise ValueError("cost adapter observation coverage must be an object")  # noqa: TRY004
     return dict(observation)
@@ -79,7 +101,9 @@ def execute_lookup_plan(experiment_plan: ExperimentPlan, executor: Any) -> Any:
     from .. import execution as seam
 
     if getattr(executor, "evidence_class", None) != "lookup-table estimated":
-        raise ValueError("estimate-cost mode requires the lookup-table estimated adapter")
+        raise ValueError(
+            "estimate-cost mode requires the lookup-table estimated adapter"
+        )
     metadata_factory = getattr(executor, "lookup_metadata", None)
     if not callable(metadata_factory):
         raise ValueError("estimate-cost adapter must expose lookup metadata")  # noqa: TRY004
@@ -97,7 +121,9 @@ def execute_lookup_plan(experiment_plan: ExperimentPlan, executor: Any) -> Any:
         raise ValueError(f"lookup metadata is missing fields: {missing}")
     if metadata["source_artifact_id"] != metadata["source_artifact"].get("artifact_id"):
         raise ValueError("lookup metadata source artifact identity is inconsistent")
-    if metadata["lookup_manifest_id"] != metadata["coverage_manifest"].get("manifest_id"):
+    if metadata["lookup_manifest_id"] != metadata["coverage_manifest"].get(
+        "manifest_id"
+    ):
         raise ValueError("lookup metadata coverage identity is inconsistent")
 
     producer_git_sha = seam._producer_git_sha()
@@ -124,7 +150,16 @@ def execute_lookup_plan(experiment_plan: ExperimentPlan, executor: Any) -> Any:
 
     try:
         hardware_identity = dict(executor.hardware_identity())
-    except (RuntimeError, ValueError, OSError, TypeError, KeyError, IndexError, AttributeError, MemoryError) as exc:
+    except (
+        RuntimeError,
+        ValueError,
+        OSError,
+        TypeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+        MemoryError,
+    ) as exc:
         hardware_identity = {
             "identity_status": "not_applicable",
             "reason_code": f"LOOKUP_HARDWARE_IDENTITY_EXCEPTION:{type(exc).__name__}",
@@ -148,7 +183,9 @@ def execute_lookup_plan(experiment_plan: ExperimentPlan, executor: Any) -> Any:
             lineage = {
                 "producer_git_sha": producer_git_sha,
                 "source_manifest_id": experiment_plan.source_manifest_id,
-                "source_artifact_id": experiment_plan.data["source_manifest"]["artifact_id"],
+                "source_artifact_id": experiment_plan.data["source_manifest"][
+                    "artifact_id"
+                ],
                 "additional_source_artifact_ids": source_ids,
                 "configuration_hash": configuration_hash,
                 "record_count": 1,

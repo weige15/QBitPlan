@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypeVar
+from typing import Any, Self, TypeVar
 
 import pytest
 from test_experiment_seam import _patch_synthetic_manifest_constants, _plan
@@ -41,6 +41,7 @@ class FakeProfileExecutor:
         self.failing_profile = failing_profile
         self.prepared: list[str] = []
         self.forward_calls: list[tuple[str, str]] = []
+        self.trace_calls: list[bool] = []
 
     def hardware_identity(self) -> Mapping[str, Any]:
         return {
@@ -67,9 +68,14 @@ class FakeProfileExecutor:
         }
 
     def execute_prepared(
-        self, query: Mapping[str, Any], variant_id: str
+        self,
+        query: Mapping[str, Any],
+        variant_id: str,
+        *,
+        trace: bool = False,
     ) -> Mapping[str, Any]:
         self.forward_calls.append((query["query_id"], variant_id))
+        self.trace_calls.append(trace)
         return {
             "status": "complete",
             "transform_status": "not_applicable"
@@ -201,53 +207,8 @@ def test_direct_cost_runner_uses_shared_executor_and_writes_measured_bundle(
     assert all(row["raw_trace"]["events"] for row in traces)
     assert len(executor.prepared) == 4
     assert len(executor.forward_calls) == 4 * 2 * (5 + 10 + 1)
-
-
-def test_cuda_trace_probe_returns_bounded_operation_trace_without_profiler_materialization(
-    monkeypatch,
-) -> None:
-    timeline: list[str] = []
-
-    class FakeEvent:
-        def __init__(self, **_: Any) -> None:
-            return None
-
-        def record(self) -> None:
-            timeline.append("event")
-
-        def elapsed_time(self, _: Any) -> float:
-            return 1.25
-
-    fake_cuda = SimpleNamespace(
-        Event=FakeEvent,
-        is_available=lambda: True,
-        synchronize=lambda: timeline.append("sync"),
-    )
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=fake_cuda))
-
-    result, trace = CudaTraceProbe().trace(
-        lambda: (timeline.append("operation") or {"status": "complete"})
-    )
-
-    assert result == {"status": "complete"}
-    assert trace["status"] == "complete"
-    assert trace["trace_representation"] == "bounded_cuda_event"
-    assert len(trace["events"]) == 1
-    assert trace["events"][0]["name"] == "qbitplan.operation"
-    assert trace["events"][0]["device_time_ns"] == 1_250_000
-    assert trace["events"][0]["host_end_ns"] > trace["events"][0]["host_start_ns"]
-    assert trace["events"][0]["host_elapsed_ns"] == (
-        trace["events"][0]["host_end_ns"] - trace["events"][0]["host_start_ns"]
-    )
-    assert timeline == ["sync", "event", "operation", "event", "sync"]
-    for dimension in (
-        "host_to_device_bytes",
-        "prefetch_stall_time",
-        "kernel_switch_count",
-    ):
-        assert trace["dimension_coverage"][dimension]["status"] == (
-            "omitted/unavailable"
-        )
+    assert executor.trace_calls.count(False) == 4 * 2 * (5 + 10)
+    assert executor.trace_calls.count(True) == 4 * 2
 
 
 def test_cuda_trace_probe_reports_unavailable_without_untraced_operation(
@@ -260,15 +221,87 @@ def test_cuda_trace_probe_reports_unavailable_without_untraced_operation(
     )
     calls: list[str] = []
 
-    result, trace = CudaTraceProbe().trace(
-        lambda: (calls.append("operation") or {"status": "complete"})
-    )
+    def operation() -> dict[str, str]:
+        calls.append("operation")
+        return {"status": "complete"}
+
+    result, trace = CudaTraceProbe().trace(operation)
 
     assert calls == []
     assert result["status"] == "invalid"
     assert trace == {
         "status": "invalid",
         "reason_code": "CUDA_TRACE_UNAVAILABLE",
+    }
+
+
+def test_cuda_trace_probe_extracts_annotated_copy_and_group_transitions(
+    monkeypatch,
+) -> None:
+    class FakeEvent:
+        def __init__(
+            self,
+            name: str,
+            start: float,
+            end: float,
+            device_memory_usage: int = 0,
+        ) -> None:
+            self.name = name
+            self.cpu_time_total = end - start
+            self.self_cpu_time_total = end - start
+            self.device_time_total = 1.5
+            self.self_device_time_total = 1.5
+            self.device_memory_usage = device_memory_usage
+            self.time_range = SimpleNamespace(start=start, end=end)
+
+    class FakeProfiler:
+        def __init__(self, **_: Any) -> None:
+            self._events = [
+                FakeEvent("Memcpy HtoD (Pageable -> Device)", 10.0, 20.0),
+                FakeEvent("qbitplan.group.0.0", 30.0, 40.0),
+                FakeEvent("qbitplan.group.1.1", 50.0, 60.0),
+                FakeEvent("qbitplan.group.2.0", 70.0, 80.0),
+            ]
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def step(self) -> None:
+            return None
+
+        def events(self) -> list[FakeEvent]:
+            return self._events
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            synchronize=lambda: None,
+        ),
+        profiler=SimpleNamespace(
+            ProfilerActivity=SimpleNamespace(CPU="cpu", CUDA="cuda"),
+            profile=FakeProfiler,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    result, trace = CudaTraceProbe().trace(lambda: {"status": "complete"})
+
+    assert result == {"status": "complete"}
+    assert trace["status"] == "complete"
+    assert trace["trace_representation"] == "profiler_events"
+    assert trace["kernel_switch_count"] == 2
+    assert trace["dimension_coverage"]["host_to_device_bytes"] == {
+        "status": "omitted/unavailable",
+        "reason": "TRACE_H2D_COPY_BYTES_UNAVAILABLE",
+        "evidence_class": "analytical",
+    }
+    assert trace["dimension_coverage"]["prefetch_stall_time"] == {
+        "status": "omitted/unavailable",
+        "reason": "no-prefetch-path",
+        "evidence_class": "analytical",
     }
 
 
@@ -320,7 +353,7 @@ def test_direct_cost_omits_uncovered_dimensions_without_zero_or_lookup_fallback(
             assert row["cost_vector"][dimension]["status"] == "omitted/unavailable"
             assert row["cost_vector"][dimension].get("value") != 0
             assert (
-                row["cost_vector"][dimension]["evidence_class"] == "directly measured"
+                row["cost_vector"][dimension]["evidence_class"] == "analytical"
             )
 
 
@@ -375,9 +408,13 @@ def test_direct_cost_preserves_partial_timing_on_measured_forward_failure(
 
     class FailingMeasuredForwardExecutor(FakeProfileExecutor):
         def execute_prepared(
-            self, query: Mapping[str, Any], variant_id: str
+            self,
+            query: Mapping[str, Any],
+            variant_id: str,
+            *,
+            trace: bool = False,
         ) -> Mapping[str, Any]:
-            result = super().execute_prepared(query, variant_id)
+            result = super().execute_prepared(query, variant_id, trace=trace)
             if variant_id == "BF16" and len(self.forward_calls) >= 6:
                 return {
                     **result,
@@ -491,6 +528,54 @@ def test_direct_cost_profile_failure_is_recorded_without_substitution(
     assert len(failed) == 2
     assert all(row["terminal_status"] == "invalid" for row in failed)
     assert all(row["reason_code"] == "TRANSFORM_UNSUPPORTED" for row in failed)
+    assert {row["profile_id"] for row in rows} == {
+        "BF16",
+        "00000000",
+        "11111111",
+        "01010101",
+    }
+
+
+def test_direct_cost_bf16_oom_is_recorded_without_profile_substitution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_synthetic_manifest_constants(monkeypatch)
+    plan = _direct_cost_plan(tmp_path / "artifacts")
+
+    class Bf16OomExecutor(FakeProfileExecutor):
+        def prepare_variant(self, variant_id: str) -> Mapping[str, Any]:
+            if variant_id == "BF16":
+                self.prepared.append(variant_id)
+                return {
+                    "status": "invalid",
+                    "reason_code": "OOM",
+                    "transform_status": "not_applicable",
+                    "forward_status": "not_attempted",
+                }
+            return super().prepare_variant(variant_id)
+
+    bundle = execute_plan(
+        plan,
+        executor=DirectCostRunner(
+            plan,
+            Bf16OomExecutor(),
+            memory_probe=FakeMemoryProbe(),
+            trace_probe=FakeTraceProbe(),
+        ),
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (bundle.path / "cost-observations.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    bf16_rows = [row for row in rows if row["profile_id"] == "BF16"]
+    executable_rows = [row for row in rows if row["profile_id"] != "BF16"]
+    assert len(bf16_rows) == 2
+    assert all(row["terminal_status"] == "invalid" for row in bf16_rows)
+    assert all(row["reason_code"] == "OOM" for row in bf16_rows)
+    assert all(row["terminal_status"] == "complete" for row in executable_rows)
     assert {row["profile_id"] for row in rows} == {
         "BF16",
         "00000000",

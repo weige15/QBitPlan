@@ -83,14 +83,19 @@ def test_lookup_estimate_bundle_preserves_coverage_and_omissions(
 
     records = [
         json.loads(line)
-        for line in (bundle.path / "cost-estimates.ndjson").read_text(encoding="utf-8").splitlines()
+        for line in (bundle.path / "cost-estimates.ndjson")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert len(records) == 4
     covered = next(row for row in records if row["query_id"] == "train/0.json")
     assert covered["profile_id"] == "00000000"
     assert covered["cost_vector"]["latency"]["status"] == "estimated"
     assert covered["cost_vector"]["latency"]["value"] == 17
-    assert covered["cost_vector"]["host_to_device_bytes"]["status"] == "omitted/unavailable"
+    assert (
+        covered["cost_vector"]["host_to_device_bytes"]["status"]
+        == "omitted/unavailable"
+    )
     assert covered["cost_vector"]["host_to_device_bytes"]["reason"]
     assert covered["evidence_class"] == "lookup-table estimated"
 
